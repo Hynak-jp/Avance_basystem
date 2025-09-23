@@ -885,6 +885,8 @@ function generateS2002Draft_(caseInfo, parsed) {
     Logger.log('[S2002] draftsFolderId=%s caseFolderId=%s', drafts.getId(), caseInfo.folderId);
   } catch (_) {}
 
+  const M = (parsed && parsed.model) || { app: {}, addr: {}, ref: {} };
+
   // テンプレ複製（履歴保全のため submission_id を付与推奨）
   const subId =
     parsed.meta?.submission_id ||
@@ -896,9 +898,6 @@ function generateS2002Draft_(caseInfo, parsed) {
   } catch (_) {}
   const doc = DocumentApp.openById(gdocId);
   const body = doc.getBody();
-
-  // 差し込み（最低限：ここから増やす）
-  const M = parsed.model;
 
   // 申立人情報
   replaceAll_(body, '{{app.name}}', M.app.name || '');
@@ -1033,7 +1032,3 @@ function sanitizeAltAddressValue_S2002_(s) {
       .replace(/（\s*住民票と異なる場合\s*）/g, ' ') // ← S2002固有の注記除去
   );
 }
-
-// 使うとき（S2002の {{addr.alt_full}} 差し込み直前だけ）
-const altOut = sanitizeAltAddressValue_S2002_(M.addr.alt_full);
-replaceAll_(body, '{{addr.alt_full}}', altOut || '');
