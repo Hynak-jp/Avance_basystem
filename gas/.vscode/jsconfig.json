@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "lib": ["ES2020", "DOM"],
+    "types": ["google-apps-script"]
+  },
+  "include": [
+    "../backend/src/**/*.js",
+    "../src/**/*.ts"
+  ],
+  "exclude": [
+    "**/node_modules/**",
+    "**/dist/**"
+  ],
+  "typeAcquisition": {
+    "enable": true
+  }
+}
+

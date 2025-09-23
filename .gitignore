@@ -1,0 +1,10 @@
+node_modules/
+.next/
+out/
+.env*
+.DS_Store
+dist/
+# clasp 認証ファイルは通常ホーム直下だが、念のため
+.clasprc.json
+npm-debug.log*
+yarn-error.log*

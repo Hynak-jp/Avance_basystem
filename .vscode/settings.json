@@ -1,0 +1,8 @@
+{
+  // Force Prettier to use the workspace config and avoid a stale user-level path
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true,
+  "prettier.configPath": ".prettierrc.json",
+  "prettier.useEditorConfig": true,
+  "chatgpt.openOnStartup": true
+}

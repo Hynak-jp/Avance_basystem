@@ -1,0 +1,40 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "GAS: backend push",
+      "type": "shell",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "command": "clasp push",
+      "problemMatcher": []
+    },
+    {
+      "label": "GAS: backend open",
+      "type": "shell",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "command": "clasp open-script",
+      "problemMatcher": []
+    },
+    {
+      "label": "GAS: backend pull",
+      "type": "shell",
+      "options": { "cwd": "${workspaceFolder}/backend" },
+      "command": "clasp pull",
+      "problemMatcher": []
+    },
+    {
+      "label": "GAS: hello push",
+      "type": "shell",
+      "options": { "cwd": "${workspaceFolder}/hello-world" },
+      "command": "clasp push",
+      "problemMatcher": []
+    },
+    {
+      "label": "GAS: hello open",
+      "type": "shell",
+      "options": { "cwd": "${workspaceFolder}/hello-world" },
+      "command": "clasp open-script",
+      "problemMatcher": []
+    }
+  ]
+}

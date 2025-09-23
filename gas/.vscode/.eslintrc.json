@@ -1,0 +1,41 @@
+{
+  "root": true,
+  "env": {
+    "es2021": true
+  },
+  "extends": ["eslint:recommended"],
+  "parserOptions": {
+    "ecmaVersion": 2021,
+    "sourceType": "script"
+  },
+  "rules": {
+    "no-unused-vars": [
+      "warn",
+      { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }
+    ],
+    "no-undef": "error",
+    "no-console": "off",
+    "eqeqeq": "warn",
+    "curly": "warn"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.ts"],
+      "parserOptions": { "sourceType": "module" }
+    }
+  ],
+  "globals": {
+    "Logger": "readonly",
+    "PropertiesService": "readonly",
+    "DriveApp": "readonly",
+    "Drive": "readonly",
+    "GmailApp": "readonly",
+    "SpreadsheetApp": "readonly",
+    "ScriptApp": "readonly",
+    "Utilities": "readonly",
+    "ContentService": "readonly",
+    "MimeType": "readonly",
+    "UrlFetchApp": "readonly"
+  }
+}
+
