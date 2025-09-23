@@ -42,3 +42,4 @@ yarn-error.log*
 # Next.js 型補助
 # ※ next-env.d.ts は通常 "コミットする" のが推奨です。必要なら次行をコメントアウトせず残しても可
 # next-env.d.ts
+.vercel
