@@ -2,37 +2,49 @@
   "name": "formlist",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9.12.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
-    "lint": "next lint"
+    "start": "next start -p ${PORT:-3000}",
+    "lint": "eslint . --ext .ts,.tsx --max-warnings=0",
+    "lint:fix": "eslint . --ext .ts,.tsx --fix",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "format": "prettier --write .",
+    "check": "pnpm run lint && pnpm run typecheck"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.3",
     "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "lucide-react": "^0.536.0",
     "next": "^15.4.5",
     "next-auth": "^4.24.11",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "tailwind-merge": "^3.3.1",
+    "tailwind-variants": "^2.1.0",
     "tailwindcss-animate": "^1.0.7",
     "zustand": "^5.0.8"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@shadcn/ui": "^0.0.4",
-    "@types/node": "^24.2.0",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
     "autoprefixer": "^10.4.21",
-    "clsx": "^2.1.1",
     "eslint": "^9",
     "eslint-config-next": "15.4.5",
+    "eslint-config-prettier": "^9.1.0",
     "postcss": "^8.5.6",
+    "prettier": "^3.3.3",
+    "prettier-plugin-tailwindcss": "^0.6.8",
     "sass": "^1.89.2",
-    "tailwind-variants": "^2.1.0",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.9.2"
   }

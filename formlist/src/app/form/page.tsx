@@ -96,6 +96,7 @@ export default async function FormPage() {
     ok?: boolean;
     hasIntake?: boolean;
     activeCaseId?: string | null;
+    intakeReady?: boolean;
   };
 
   if (!status?.hasIntake) {
@@ -114,16 +115,36 @@ export default async function FormPage() {
     );
   }
 
+  const intakeReady = status.intakeReady ?? false;
   const activeCaseId = status.activeCaseId || '0001';
-  const formsWithHref = forms.map((f) => ({
-    ...f,
-    href: makeFormUrl(f.baseUrl, lineId!, activeCaseId),
-  }));
+  const intakeFormIdEnv = process.env.NEXT_PUBLIC_INTAKE_FORM_ID;
+  const fallbackIntakeFormId = forms[0]?.formId;
+  const preferredIntakeFormId =
+    intakeFormIdEnv && intakeFormIdEnv.length > 0 ? intakeFormIdEnv : fallbackIntakeFormId;
+  const formsWithHref = forms.map((f, index) => {
+    const href = makeFormUrl(f.baseUrl, lineId!, activeCaseId);
+    const isIntakeForm =
+      preferredIntakeFormId && preferredIntakeFormId.length > 0
+        ? f.formId === preferredIntakeFormId
+        : index === 0;
+    const disabled = !intakeReady && !isIntakeForm;
+    return {
+      ...f,
+      href,
+      disabled,
+      disabledReason: disabled ? '初回受付フォームの処理が完了するまでお待ちください。' : undefined,
+    };
+  });
 
   return (
     <main className="container mx-auto px-4 py-10">
       <h1 className="text-3xl font-bold mb-6">提出フォーム一覧</h1>
       <UserInfo />
+      {!intakeReady && (
+        <div className="mb-6 rounded bg-yellow-100 px-4 py-3 text-sm text-yellow-800">
+          初回受付フォームの処理が完了するまで、ほかのフォームは操作できません。数分後に再度ご確認ください。
+        </div>
+      )}
       <FormProgressClient lineId={lineId!} displayName={displayName} forms={formsWithHref} />
     </main>
   );

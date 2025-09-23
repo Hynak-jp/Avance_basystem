@@ -251,6 +251,30 @@ function bs_ensureCaseFolder_(userKey, caseId) {
   return root.createFolder(name).getId();
 }
 
+/**
+ * intake JSON が案件フォルダに移動済みかを確認（Drive には副作用なし）
+ */
+function bs_isIntakeJsonReady_(userKey, caseId) {
+  if (!DRIVE_ROOT_ID || !userKey || !caseId) return false;
+  try {
+    const root = DriveApp.getFolderById(DRIVE_ROOT_ID);
+    const folders = root.getFoldersByName(`${userKey}-${caseId}`);
+    if (!folders.hasNext()) return false;
+    const caseFolder = folders.next();
+    const files = caseFolder.getFiles();
+    while (files.hasNext()) {
+      const file = files.next();
+      const name = file && file.getName ? file.getName() : '';
+      if (/^intake__/i.test(name) && /\.json$/i.test(name)) return true;
+    }
+  } catch (e) {
+    try {
+      Logger.log('[bs_isIntakeJsonReady_] error: %s', (e && e.stack) || e);
+    } catch (_) {}
+  }
+  return false;
+}
+
 /** ---------- doGet / doPost ---------- **/
 function doGet(e) {
   return ContentService.createTextOutput(
@@ -361,8 +385,16 @@ function doPost(e) {
       const rowVals = sh.getRange(up.row, 1, 1, headers.length).getValues()[0];
       const intakeAt = 'intakeAt' in idx ? rowVals[idx['intakeAt']] : '';
       const activeCaseId = 'activeCaseId' in idx ? rowVals[idx['activeCaseId']] : '';
+      const hasIntake = !!intakeAt;
+      const intakeReady = hasIntake && activeCaseId ? bs_isIntakeJsonReady_(userKey, activeCaseId) : false;
       return bs_jsonResponse_(
-        { ok: true, VER, hasIntake: !!intakeAt, activeCaseId: activeCaseId || null },
+        {
+          ok: true,
+          VER,
+          hasIntake,
+          activeCaseId: activeCaseId || null,
+          intakeReady,
+        },
         200
       );
     }
