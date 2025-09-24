@@ -5,10 +5,12 @@ import UserInfo from '@/components/UserInfo';
 import FormProgressClient from '@/components/FormProgressClient';
 import { makeFormUrl, makeIntakeUrl } from '@/lib/formUrl';
 import { headers } from 'next/headers';
+import { unstable_noStore as noStore } from 'next/cache';
 // headers は不要。内部 API には相対パスで十分。
 
 // サーバー動作の安定化（SSRで毎回取得）
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 export const fetchCache = 'force-no-store';
 export const runtime = 'nodejs';
 
@@ -74,7 +76,28 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
   return { forms };
 }
 
+async function fetchIntakeStatus(lineId?: string | null, caseId?: string | null): Promise<boolean> {
+  try {
+    if (!lineId || !caseId) return false;
+    const endpoint = process.env.GAS_ENDPOINT;
+    if (!endpoint) return false;
+    const url = new URL(endpoint);
+    url.searchParams.set('route', 'status');
+    url.searchParams.set('lineId', lineId);
+    url.searchParams.set('caseId', caseId);
+    const response = await fetch(url.toString(), {
+      cache: 'no-store',
+      next: { revalidate: 0 },
+    });
+    const json = await response.json();
+    return !!json?.intakeReady;
+  } catch {
+    return false;
+  }
+}
+
 export default async function FormPage() {
+  noStore();
   const { forms } = await loadForms(); // ← ここで取得
   const session = await getServerSession(authOptions);
   const lineId = session?.lineId ?? null;
@@ -114,7 +137,7 @@ export default async function FormPage() {
 
   const rawCaseId = status?.caseId ?? status?.activeCaseId ?? null;
   const caseId = typeof rawCaseId === 'string' && rawCaseId.length > 0 ? rawCaseId : null;
-  const intakeReady = caseId ? status?.intakeReady ?? false : false;
+  const intakeReady = await fetchIntakeStatus(lineId, caseId);
   const intakeSubmitted = status?.hasIntake ?? Boolean(caseId);
   const caseReady = Boolean(caseId);
   const intakeFormIdEnv = process.env.NEXT_PUBLIC_INTAKE_FORM_ID;
@@ -128,28 +151,26 @@ export default async function FormPage() {
       preferredIntakeFormId && preferredIntakeFormId.length > 0
         ? f.formId === preferredIntakeFormId
         : index === 0;
+    const locked = !isIntakeForm && (!caseReady || !intakeReady);
     let signedHref: string | undefined;
-    if (isIntakeForm) {
-      signedHref = caseReady
-        ? makeFormUrl(f.baseUrl, lineId!, caseId!)
-        : makeIntakeUrl(intakeBase, intakeRedirect);
-    } else if (caseReady && intakeReady) {
-      signedHref = makeFormUrl(f.baseUrl, lineId!, caseId!);
-    }
-
-    let disabled = false;
-    let disabledReason: string | undefined;
-    if (!isIntakeForm) {
-      if (!caseReady) {
-        disabled = true;
-        disabledReason = '受付フォームの登録が完了するまでご利用いただけません。';
-      } else if (!intakeReady) {
-        disabled = true;
-        disabledReason = '初回受付フォームの処理が完了するまでお待ちください。';
+    if (!locked) {
+      if (isIntakeForm) {
+        signedHref = caseReady && caseId
+          ? makeFormUrl(f.baseUrl, lineId!, caseId)
+          : makeIntakeUrl(intakeBase, intakeRedirect);
+      } else if (caseReady && caseId) {
+        signedHref = makeFormUrl(f.baseUrl, lineId!, caseId);
       }
     }
-    if (!disabled && !signedHref) {
-      disabled = true;
+
+    const disabled = locked || !signedHref;
+    let disabledReason: string | undefined;
+    if (locked) {
+      disabledReason = !caseReady
+        ? '受付フォームの登録が完了するまでご利用いただけません。'
+        : '初回受付フォームの処理が完了するまでお待ちください。';
+    } else if (disabled) {
+      disabledReason = '現在は利用できません。しばらくお待ちください。';
     }
 
     return {
