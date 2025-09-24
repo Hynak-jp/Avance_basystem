@@ -9,7 +9,7 @@ type Props = {
   description: string;
   baseUrl: string; // 外部フォームのURL
   lineId: string;
-  href?: string; // 事前署名済みURL（優先）
+  signedHref?: string; // 事前署名済みURL（優先）
   disabled?: boolean;
   disabledReason?: string;
 };
@@ -20,7 +20,7 @@ export default function FormCard({
   description,
   baseUrl,
   lineId,
-  href: hrefOverride,
+  signedHref: hrefOverride,
   disabled,
   disabledReason,
 }: Props) {
@@ -29,13 +29,18 @@ export default function FormCard({
   // LIFFの仕様上、URLに改行やスペースが入るとエラーになるため、encodeURIComponentでエンコードする
   // redirectUrl は送信後に戻ってくるURL（ここでは完了ページに戻す）
   // formId も渡しておくと、完了ページでどのフォームが送信されたか分かる
-  const fallback = `${baseUrl}?line_id[0]=${encodeURIComponent(lineId)}&formId=${encodeURIComponent(formId)}&redirectUrl=${encodeURIComponent('https://formlist.vercel.app/done?formId=' + formId)}`;
-  const href = hrefOverride || fallback;
+  const fallback = disabled
+    ? undefined
+    : `${baseUrl}?line_id[0]=${encodeURIComponent(lineId)}&formId=${encodeURIComponent(
+        formId
+      )}&redirectUrl=${encodeURIComponent('https://formlist.vercel.app/done?formId=' + formId)}`;
+  const signedHref = hrefOverride ?? fallback;
 
   const isDone = status === 'done';
-  const isDisabled = !isDone && !!disabled;
-  const containerClass = `border p-4 rounded ${
-    isDisabled ? 'border-gray-300 bg-gray-50 text-gray-500 opacity-80' : 'bg-white'
+  const isClickable = !!signedHref && !disabled && !isDone;
+  const isDisabled = !isClickable && !isDone;
+  const containerClass = `rounded-lg border p-4 ${
+    isClickable ? '' : 'bg-gray-50 text-gray-500 opacity-60 pointer-events-none'
   }`;
   const label = isDone
     ? '（送信済み）'
@@ -61,22 +66,25 @@ export default function FormCard({
         >
           送信済み
         </button>
-      ) : isDisabled ? (
-        <button
-          className="px-3 py-1.5 bg-gray-300 text-gray-600 rounded cursor-not-allowed"
-          title={disabledMsg}
-          disabled
-        >
-          準備中
-        </button>
+      ) : !isClickable ? (
+        <>
+          <button
+            className="px-3 py-2 rounded bg-gray-200 cursor-not-allowed"
+            title={disabledMsg}
+            disabled
+          >
+            初回受付中
+          </button>
+          {disabledReason && <div className="mt-2 text-xs text-gray-600">{disabledReason}</div>}
+        </>
       ) : (
         <Link
-          href={href}
+          href={signedHref}
           prefetch={false}
           onClick={() => store.setStatus(formId, 'in_progress')}
-          className="inline-block px-3 py-1.5 bg-blue-600 text-white rounded"
+          className="inline-block px-3 py-2 rounded bg-black text-white"
         >
-          フォームへ進む
+          開く
         </Link>
       )}
     </div>

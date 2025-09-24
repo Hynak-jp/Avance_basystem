@@ -5,10 +5,12 @@ import UserInfo from '@/components/UserInfo';
 import FormProgressClient from '@/components/FormProgressClient';
 import { makeFormUrl, makeIntakeUrl } from '@/lib/formUrl';
 import { headers } from 'next/headers';
+import { unstable_noStore as noStore } from 'next/cache';
 // headers は不要。内部 API には相対パスで十分。
 
 // サーバー動作の安定化（SSRで毎回取得）
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 export const fetchCache = 'force-no-store';
 export const runtime = 'nodejs';
 
@@ -74,7 +76,28 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
   return { forms };
 }
 
+async function fetchIntakeStatus(lineId?: string | null, caseId?: string | null): Promise<boolean> {
+  try {
+    if (!lineId || !caseId) return false;
+    const endpoint = process.env.GAS_ENDPOINT;
+    if (!endpoint) return false;
+    const url = new URL(endpoint);
+    url.searchParams.set('route', 'status');
+    url.searchParams.set('lineId', lineId);
+    url.searchParams.set('caseId', caseId);
+    const response = await fetch(url.toString(), {
+      cache: 'no-store',
+      next: { revalidate: 0 },
+    });
+    const json = await response.json();
+    return !!json?.intakeReady;
+  } catch {
+    return false;
+  }
+}
+
 export default async function FormPage() {
+  noStore();
   const { forms } = await loadForms(); // ← ここで取得
   const session = await getServerSession(authOptions);
   const lineId = session?.lineId ?? null;
@@ -87,12 +110,14 @@ export default async function FormPage() {
   const origin =
     process.env.NEXT_PUBLIC_BASE_URL ||
     `${h.get('x-forwarded-proto') ?? 'http'}://${h.get('host')}`;
-  type StatusResponse = {
-    ok?: boolean;
-    hasIntake?: boolean;
-    activeCaseId?: string | null;
-    intakeReady?: boolean;
-  };
+type StatusResponse = {
+  ok?: boolean;
+  caseId?: string | null;
+  intakeReady?: boolean;
+  caseFolderReady?: boolean;
+  hasIntake?: boolean;
+  activeCaseId?: string | null;
+};
 
   let status: StatusResponse | null = null;
   try {
@@ -111,9 +136,14 @@ export default async function FormPage() {
     status = null;
   }
 
-  const hasIntake = status?.hasIntake ?? false;
-  const intakeReady = status?.intakeReady ?? false;
-  const activeCaseId = status?.activeCaseId || '0001';
+  const rawCaseId = status?.caseId ?? status?.activeCaseId ?? null;
+  const caseId = typeof rawCaseId === 'string' && rawCaseId.length > 0 ? rawCaseId : null;
+  const caseFolderReady = status?.caseFolderReady ?? Boolean(caseId);
+  const intakeReady = caseFolderReady
+    ? status?.intakeReady ?? (await fetchIntakeStatus(lineId, caseId))
+    : false;
+  const intakeSubmitted = status?.hasIntake ?? Boolean(caseId);
+  const caseReady = Boolean(caseId);
   const intakeFormIdEnv = process.env.NEXT_PUBLIC_INTAKE_FORM_ID;
   const fallbackIntakeFormId = forms[0]?.formId;
   const preferredIntakeFormId =
@@ -125,22 +155,31 @@ export default async function FormPage() {
       preferredIntakeFormId && preferredIntakeFormId.length > 0
         ? f.formId === preferredIntakeFormId
         : index === 0;
-    const href = isIntakeForm
-      ? hasIntake
-        ? makeFormUrl(f.baseUrl, lineId!, activeCaseId)
-        : makeIntakeUrl(intakeBase, intakeRedirect)
-      : hasIntake
-      ? makeFormUrl(f.baseUrl, lineId!, activeCaseId)
-      : undefined;
-    const disabled = hasIntake ? !intakeReady && !isIntakeForm : !isIntakeForm;
-    const disabledReason = !hasIntake
-      ? '受付フォームの登録が完了するまでご利用いただけません。'
-      : disabled
-      ? '初回受付フォームの処理が完了するまでお待ちください。'
-      : undefined;
+    const locked = !isIntakeForm && !caseFolderReady;
+    let signedHref: string | undefined;
+    if (!locked) {
+      if (isIntakeForm) {
+        signedHref = caseReady && caseId
+          ? makeFormUrl(f.baseUrl, lineId!, caseId)
+          : makeIntakeUrl(intakeBase, intakeRedirect);
+      } else if (caseReady && caseId) {
+        signedHref = makeFormUrl(f.baseUrl, lineId!, caseId);
+      }
+    }
+
+    const disabled = locked || !signedHref;
+    let disabledReason: string | undefined;
+    if (locked) {
+      disabledReason = !caseReady
+        ? '受付フォームの登録が完了するまでご利用いただけません。'
+        : '受付フォームを処理しています。しばらくお待ちください。';
+    } else if (disabled) {
+      disabledReason = '現在は利用できません。しばらくお待ちください。';
+    }
+
     return {
       ...f,
-      href,
+      signedHref,
       disabled,
       disabledReason,
     };
@@ -150,13 +189,19 @@ export default async function FormPage() {
     <main className="container mx-auto px-4 py-10">
       <h1 className="text-3xl font-bold mb-6">提出フォーム一覧</h1>
       <UserInfo />
-      {!hasIntake ? (
+      {!caseReady ? (
         <div className="mb-6 rounded bg-blue-50 px-4 py-3 text-sm text-blue-900">
-          まずは「受付フォーム」をご記入ください。受付が完了すると、ほかのフォームが利用できるようになります。
+          {intakeSubmitted
+            ? '受付情報を確認しています。case_id が発行されると、ほかのフォームが利用できるようになります。'
+            : 'まずは「受付フォーム」をご記入ください。受付が完了すると、ほかのフォームが利用できるようになります。'}
+        </div>
+      ) : !caseFolderReady ? (
+        <div className="mb-6 rounded bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          受付フォームの情報を整理しています。まもなくほかのフォームが利用できるようになります。
         </div>
       ) : !intakeReady ? (
         <div className="mb-6 rounded bg-yellow-100 px-4 py-3 text-sm text-yellow-800">
-          初回受付フォームの処理が完了するまで、ほかのフォームは操作できません。数分後に再度ご確認ください。
+          受付フォームの処理を継続しています。ほかのフォームは利用できますが、必要に応じて再読み込みしてください。
         </div>
       ) : null}
       <FormProgressClient lineId={lineId!} displayName={displayName} forms={formsWithHref} />

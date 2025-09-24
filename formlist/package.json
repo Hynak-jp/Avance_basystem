@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "eslint . --ext .ts,.tsx --max-warnings=0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "pnpm run lint && pnpm run typecheck"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.3",
