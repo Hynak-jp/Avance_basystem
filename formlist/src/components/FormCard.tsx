@@ -29,11 +29,13 @@ export default function FormCard({
   // LIFFの仕様上、URLに改行やスペースが入るとエラーになるため、encodeURIComponentでエンコードする
   // redirectUrl は送信後に戻ってくるURL（ここでは完了ページに戻す）
   // formId も渡しておくと、完了ページでどのフォームが送信されたか分かる
-  const fallback = `${baseUrl}?line_id[0]=${encodeURIComponent(lineId)}&formId=${encodeURIComponent(formId)}&redirectUrl=${encodeURIComponent('https://formlist.vercel.app/done?formId=' + formId)}`;
-  const href = hrefOverride || fallback;
+  const fallback = disabled
+    ? undefined
+    : `${baseUrl}?line_id[0]=${encodeURIComponent(lineId)}&formId=${encodeURIComponent(formId)}&redirectUrl=${encodeURIComponent('https://formlist.vercel.app/done?formId=' + formId)}`;
+  const href = hrefOverride ?? fallback;
 
   const isDone = status === 'done';
-  const isDisabled = !isDone && !!disabled;
+  const isDisabled = !isDone && (!!disabled || !href);
   const containerClass = `border p-4 rounded ${
     isDisabled ? 'border-gray-300 bg-gray-50 text-gray-500 opacity-80' : 'bg-white'
   }`;
@@ -69,7 +71,7 @@ export default function FormCard({
         >
           準備中
         </button>
-      ) : (
+      ) : href ? (
         <Link
           href={href}
           prefetch={false}
@@ -78,7 +80,7 @@ export default function FormCard({
         >
           フォームへ進む
         </Link>
-      )}
+      ) : null}
     </div>
   );
 }
