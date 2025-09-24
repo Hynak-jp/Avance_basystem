@@ -12,6 +12,7 @@ type Props = {
   signedHref?: string; // 事前署名済みURL（優先）
   disabled?: boolean;
   disabledReason?: string;
+  completed?: boolean;
 };
 
 export default function FormCard({
@@ -23,6 +24,7 @@ export default function FormCard({
   signedHref: hrefOverride,
   disabled,
   disabledReason,
+  completed,
 }: Props) {
   const store = makeProgressStore(lineId)();
   const status: FormStatus = store.statusByForm[formId] || 'not_started';
@@ -36,17 +38,19 @@ export default function FormCard({
       )}&redirectUrl=${encodeURIComponent('https://formlist.vercel.app/done?formId=' + formId)}`;
   const signedHref = hrefOverride ?? fallback;
 
-  const isDone = status === 'done';
+  const isOverrideDone = completed ?? false;
+  const effectiveStatus: FormStatus = isOverrideDone ? 'done' : status;
+  const isDone = effectiveStatus === 'done';
   const isClickable = !!signedHref && !disabled && !isDone;
   const isDisabled = !isClickable && !isDone;
   const containerClass = `rounded-lg border p-4 ${
     isClickable ? '' : 'bg-gray-50 text-gray-500 opacity-60 pointer-events-none'
   }`;
   const label = isDone
-    ? '（送信済み）'
+    ? '（完了）'
     : isDisabled
     ? '（受付処理中）'
-    : status === 'in_progress'
+    : effectiveStatus === 'in_progress'
     ? '（入力中）'
     : '（未入力）';
   const disabledMsg = disabledReason || '現在は利用できません。しばらくお待ちください。';
@@ -61,10 +65,10 @@ export default function FormCard({
       {isDone ? (
         <button
           className="px-3 py-1.5 bg-gray-300 text-gray-600 rounded cursor-not-allowed"
-          title="送信済みのため再送できません"
+          title={isOverrideDone ? '受付フォームは完了しています' : '送信済みのため再送できません'}
           disabled
         >
-          送信済み
+          {isOverrideDone ? '受付完了しました' : '送信済み'}
         </button>
       ) : !isClickable ? (
         <>

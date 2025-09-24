@@ -17,6 +17,7 @@ type Props = {
     signedHref?: string;
     disabled?: boolean;
     disabledReason?: string;
+    completed?: boolean;
   }>;
 };
 
@@ -49,11 +50,12 @@ export default function FormProgressClient({ lineId, displayName, forms }: Props
             title={form.title}
             description={form.description}
             baseUrl={form.baseUrl}
-            signedHref={form.signedHref}
-            lineId={lineId}
-            disabled={form.disabled}
-            disabledReason={form.disabledReason}
-          />
+          signedHref={form.signedHref}
+          lineId={lineId}
+          disabled={form.disabled}
+          disabledReason={form.disabledReason}
+          completed={form.completed}
+        />
         ))}
       </div>
 

@@ -167,7 +167,12 @@ type StatusResponse = {
       }
     }
 
-    const disabled = locked || !signedHref;
+    const intakeCompleted = isIntakeForm && caseFolderReady;
+    if (intakeCompleted) {
+      signedHref = undefined;
+    }
+
+    const disabled = intakeCompleted || locked || !signedHref;
     let disabledReason: string | undefined;
     if (locked) {
       disabledReason = !caseReady
@@ -182,6 +187,7 @@ type StatusResponse = {
       signedHref,
       disabled,
       disabledReason,
+      completed: intakeCompleted,
     };
   });
 
