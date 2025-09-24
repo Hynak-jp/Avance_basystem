@@ -87,43 +87,78 @@ export default async function FormPage() {
   const origin =
     process.env.NEXT_PUBLIC_BASE_URL ||
     `${h.get('x-forwarded-proto') ?? 'http'}://${h.get('host')}`;
-  const res = await fetch(`${origin}/api/status`, {
-    method: 'GET',
-    headers: { 'x-line-id': lineId },
-    cache: 'no-store',
-  });
-  const status = (await res.json()) as {
+  type StatusResponse = {
     ok?: boolean;
     hasIntake?: boolean;
     activeCaseId?: string | null;
+    intakeReady?: boolean;
   };
 
-  if (!status?.hasIntake) {
-    const intakeBase = process.env.NEXT_PUBLIC_INTAKE_FORM_URL!;
-    const url = makeIntakeUrl(intakeBase, `${origin}/done?form=intake`);
-    return (
-      <main className="container mx-auto px-4 py-10">
-        <h1 className="text-2xl font-semibold mb-4">まずは「受付フォーム」をご記入ください</h1>
-        <UserInfo />
-        <div className="mt-6">
-          <a className="inline-block px-4 py-2 bg-blue-600 text-white rounded" href={url}>
-            受付フォームを開く
-          </a>
-        </div>
-      </main>
-    );
+  let status: StatusResponse | null = null;
+  try {
+    const res = await fetch(`${origin}/api/status`, {
+      method: 'GET',
+      headers: { 'x-line-id': lineId },
+      cache: 'no-store',
+    });
+    try {
+      const data = (await res.json()) as StatusResponse;
+      status = data;
+    } catch {
+      status = null;
+    }
+  } catch {
+    status = null;
   }
 
-  const activeCaseId = status.activeCaseId || '0001';
-  const formsWithHref = forms.map((f) => ({
-    ...f,
-    href: makeFormUrl(f.baseUrl, lineId!, activeCaseId),
-  }));
+  const hasIntake = status?.hasIntake ?? false;
+  const intakeReady = status?.intakeReady ?? false;
+  const activeCaseId = status?.activeCaseId || '0001';
+  const intakeFormIdEnv = process.env.NEXT_PUBLIC_INTAKE_FORM_ID;
+  const fallbackIntakeFormId = forms[0]?.formId;
+  const preferredIntakeFormId =
+    intakeFormIdEnv && intakeFormIdEnv.length > 0 ? intakeFormIdEnv : fallbackIntakeFormId;
+  const intakeBase = process.env.NEXT_PUBLIC_INTAKE_FORM_URL!;
+  const intakeRedirect = `${origin}/done?form=intake`;
+  const formsWithHref = forms.map((f, index) => {
+    const isIntakeForm =
+      preferredIntakeFormId && preferredIntakeFormId.length > 0
+        ? f.formId === preferredIntakeFormId
+        : index === 0;
+    const href = isIntakeForm
+      ? hasIntake
+        ? makeFormUrl(f.baseUrl, lineId!, activeCaseId)
+        : makeIntakeUrl(intakeBase, intakeRedirect)
+      : hasIntake
+      ? makeFormUrl(f.baseUrl, lineId!, activeCaseId)
+      : undefined;
+    const disabled = hasIntake ? !intakeReady && !isIntakeForm : !isIntakeForm;
+    const disabledReason = !hasIntake
+      ? '受付フォームの登録が完了するまでご利用いただけません。'
+      : disabled
+      ? '初回受付フォームの処理が完了するまでお待ちください。'
+      : undefined;
+    return {
+      ...f,
+      href,
+      disabled,
+      disabledReason,
+    };
+  });
 
   return (
     <main className="container mx-auto px-4 py-10">
       <h1 className="text-3xl font-bold mb-6">提出フォーム一覧</h1>
       <UserInfo />
+      {!hasIntake ? (
+        <div className="mb-6 rounded bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          まずは「受付フォーム」をご記入ください。受付が完了すると、ほかのフォームが利用できるようになります。
+        </div>
+      ) : !intakeReady ? (
+        <div className="mb-6 rounded bg-yellow-100 px-4 py-3 text-sm text-yellow-800">
+          初回受付フォームの処理が完了するまで、ほかのフォームは操作できません。数分後に再度ご確認ください。
+        </div>
+      ) : null}
       <FormProgressClient lineId={lineId!} displayName={displayName} forms={formsWithHref} />
     </main>
   );
