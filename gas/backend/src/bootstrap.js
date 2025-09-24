@@ -251,6 +251,62 @@ function bs_ensureCaseFolder_(userKey, caseId) {
   return root.createFolder(name).getId();
 }
 
+/**
+ * cases シートからフォルダ ID を取得（フォルダ新規作成はしない）
+ */
+function bs_resolveCaseFolderId_(userKey, caseId, lineId) {
+  if (!caseId) return '';
+  const sh = bs_getSheet_(SHEET_CASES);
+  if (sh.getLastRow() < 2) return '';
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const idx = bs_toIndexMap_(headers);
+  if (!('folderId' in idx)) return '';
+  const rowCount = sh.getLastRow() - 1;
+  const rows = sh.getRange(2, 1, rowCount, headers.length).getValues();
+  const hasUserKey = 'userKey' in idx;
+  const hasLineId = 'lineId' in idx;
+  for (let i = 0; i < rows.length; i++) {
+    const rowCaseId = String(rows[i][idx['caseId']] || '');
+    if (rowCaseId !== String(caseId)) continue;
+    if (hasUserKey && userKey) {
+      if (String(rows[i][idx['userKey']] || '') !== String(userKey)) continue;
+    } else if (hasLineId && lineId) {
+      // userKey 未保存の場合は lineId で補完
+      if (String(rows[i][idx['lineId']] || '') !== String(lineId)) continue;
+    }
+    const folderId = String(rows[i][idx['folderId']] || '').trim();
+    if (folderId) return folderId;
+    return '';
+  }
+  return '';
+}
+
+/**
+ * intake JSON が案件フォルダに移動済みかを確認（Drive Files v2 使用）
+ */
+function bs_isIntakeJsonReady_(caseFolderId) {
+  if (!caseFolderId) return false;
+  try {
+    const q = [
+      "mimeType = 'application/json'",
+      "title contains 'intake__'",
+      `'${caseFolderId}' in parents`,
+      'trashed = false',
+    ].join(' and ');
+    const res = Drive.Files.list({
+      q,
+      maxResults: 1,
+      fields: 'items(id,title)',
+    });
+    return Array.isArray(res?.items) && res.items.length > 0;
+  } catch (e) {
+    try {
+      Logger.log('[bs_isIntakeJsonReady_] error: %s', (e && e.stack) || e);
+    } catch (_) {}
+    return false;
+  }
+}
+
 /** ---------- doGet / doPost ---------- **/
 function doGet(e) {
   return ContentService.createTextOutput(
@@ -360,9 +416,19 @@ function doPost(e) {
       const idx = bs_toIndexMap_(headers);
       const rowVals = sh.getRange(up.row, 1, 1, headers.length).getValues()[0];
       const intakeAt = 'intakeAt' in idx ? rowVals[idx['intakeAt']] : '';
-      const activeCaseId = 'activeCaseId' in idx ? rowVals[idx['activeCaseId']] : '';
+      const activeCaseIdRaw = 'activeCaseId' in idx ? rowVals[idx['activeCaseId']] : '';
+      const activeCaseId = String(activeCaseIdRaw || '');
+      const hasIntake = !!intakeAt;
+      const caseFolderId = hasIntake && activeCaseId ? bs_resolveCaseFolderId_(userKey, activeCaseId, lineId) : '';
+      const intakeReady = caseFolderId ? bs_isIntakeJsonReady_(caseFolderId) : false;
       return bs_jsonResponse_(
-        { ok: true, VER, hasIntake: !!intakeAt, activeCaseId: activeCaseId || null },
+        {
+          ok: true,
+          VER,
+          hasIntake,
+          activeCaseId: activeCaseId || null,
+          intakeReady,
+        },
         200
       );
     }

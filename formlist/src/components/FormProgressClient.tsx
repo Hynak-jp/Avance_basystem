@@ -9,7 +9,15 @@ import FormCard from './FormCard';
 type Props = {
   lineId: string;
   displayName?: string;
-  forms: Array<{ formId: string; title: string; description: string; baseUrl: string; href?: string }>;
+  forms: Array<{
+    formId: string;
+    title: string;
+    description: string;
+    baseUrl: string;
+    href?: string;
+    disabled?: boolean;
+    disabledReason?: string;
+  }>;
 };
 
 export default function FormProgressClient({ lineId, displayName, forms }: Props) {
@@ -43,6 +51,8 @@ export default function FormProgressClient({ lineId, displayName, forms }: Props
             baseUrl={form.baseUrl}
             href={form.href}
             lineId={lineId}
+            disabled={form.disabled}
+            disabledReason={form.disabledReason}
           />
         ))}
       </div>
