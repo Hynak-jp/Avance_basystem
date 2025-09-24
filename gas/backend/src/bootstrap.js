@@ -21,6 +21,20 @@ const ALLOW_DEBUG = (PROP.getProperty('ALLOW_DEBUG') || '').toLowerCase() === '1
 const SHEET_CONTACTS = 'contacts';
 const SHEET_CASES = 'cases';
 
+function bs_normCaseId_(raw) {
+  const digits = String(raw == null ? '' : raw)
+    .trim()
+    .replace(/\D/g, '');
+  if (!digits) return '';
+  return digits.padStart(4, '0');
+}
+
+function bs_caseFolderName_(userKey, rawCaseId) {
+  const cid = bs_normCaseId_(rawCaseId);
+  if (!cid) return `${userKey}-0000`;
+  return `${userKey}-${cid}`;
+}
+
 /** ---------- ユーティリティ ---------- **/
 function bs_jsonResponse_(obj, status) {
   const out = ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(
@@ -244,18 +258,65 @@ function bs_issueCaseId_(userKey, lineId) {
 
 /** ---------- Drive フォルダ作成 / 取得 ---------- **/
 function bs_ensureCaseFolder_(userKey, caseId) {
-  const root = DriveApp.getFolderById(DRIVE_ROOT_ID);
-  const name = `${userKey}-${caseId}`;
-  const it = root.getFoldersByName(name);
-  if (it.hasNext()) return it.next().getId();
-  return root.createFolder(name).getId();
+  const rootId = DRIVE_ROOT_ID;
+  const normalizedCaseId = bs_normCaseId_(caseId);
+  if (!normalizedCaseId) throw new Error('invalid_case_id');
+  const title = bs_caseFolderName_(userKey, normalizedCaseId);
+  const escapedTitle = title.replace(/'/g, "\\'");
+  const q = [
+    `'${rootId}' in parents`,
+    "mimeType = 'application/vnd.google-apps.folder'",
+    `title = '${escapedTitle}'`,
+    'trashed = false',
+  ].join(' and ');
+
+  try {
+    const res = Drive.Files.list({
+      q,
+      maxResults: 1,
+      fields: 'items(id,title)',
+      corpora: 'allDrives',
+      includeTeamDriveItems: true,
+      supportsTeamDrives: true,
+    });
+    if (res.items && res.items.length > 0) {
+      return res.items[0].id;
+    }
+  } catch (err) {
+    try {
+      Logger.log('[bs_ensureCaseFolder_] list error: %s', (err && err.stack) || err);
+    } catch (_) {}
+  }
+
+  try {
+    const created = Drive.Files.insert(
+      {
+        title,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [{ id: rootId }],
+      },
+      null,
+      { supportsTeamDrives: true }
+    );
+    if (created && created.id) return created.id;
+  } catch (err) {
+    try {
+      Logger.log('[bs_ensureCaseFolder_] insert error: %s', (err && err.stack) || err);
+    } catch (_) {}
+  }
+
+  const root = DriveApp.getFolderById(rootId);
+  const fallback = root.getFoldersByName(title);
+  if (fallback.hasNext()) return fallback.next().getId();
+  return root.createFolder(title).getId();
 }
 
 /**
  * cases シートからフォルダ ID を取得（フォルダ新規作成はしない）
  */
 function bs_resolveCaseFolderId_(userKey, caseId, lineId) {
-  if (!caseId) return '';
+  const normalizedCaseId = bs_normCaseId_(caseId);
+  if (!normalizedCaseId) return '';
   const sh = bs_getSheet_(SHEET_CASES);
   if (sh.getLastRow() < 2) return '';
   const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
@@ -266,8 +327,8 @@ function bs_resolveCaseFolderId_(userKey, caseId, lineId) {
   const hasUserKey = 'userKey' in idx;
   const hasLineId = 'lineId' in idx;
   for (let i = 0; i < rows.length; i++) {
-    const rowCaseId = String(rows[i][idx['caseId']] || '');
-    if (rowCaseId !== String(caseId)) continue;
+    const rowCaseId = bs_normCaseId_(rows[i][idx['caseId']] || '');
+    if (rowCaseId !== normalizedCaseId) continue;
     if (hasUserKey && userKey) {
       if (String(rows[i][idx['userKey']] || '') !== String(userKey)) continue;
     } else if (hasLineId && lineId) {
@@ -288,23 +349,141 @@ function bs_isIntakeJsonReady_(caseFolderId) {
   if (!caseFolderId) return false;
   try {
     const q = [
+      `'${caseFolderId}' in parents`,
       "mimeType = 'application/json'",
       "title contains 'intake__'",
-      `'${caseFolderId}' in parents`,
       'trashed = false',
     ].join(' and ');
     const res = Drive.Files.list({
       q,
       maxResults: 1,
-      fields: 'items(id,title)',
+      fields: 'items(id,title,parents/id)',
+      corpora: 'allDrives',
+      includeTeamDriveItems: true,
+      supportsTeamDrives: true,
     });
-    return Array.isArray(res?.items) && res.items.length > 0;
+    return Array.isArray(res.items) && res.items.length > 0;
   } catch (e) {
     try {
       Logger.log('[bs_isIntakeJsonReady_] error: %s', (e && e.stack) || e);
     } catch (_) {}
     return false;
   }
+}
+
+function resolveCaseFolderId_(lineId, caseId) {
+  return bs_resolveCaseFolderId_('', caseId, lineId);
+}
+
+function bs_collectIntakeFromStaging_(lineId, caseId) {
+  const normalizedCaseId = bs_normCaseId_(caseId);
+  if (!lineId || !normalizedCaseId) return;
+  try {
+    if (typeof moveStagingIntakeJsonToCase_ === 'function') {
+      moveStagingIntakeJsonToCase_(lineId, normalizedCaseId);
+      return;
+    }
+  } catch (e) {
+    try {
+      Logger.log('[bs_collectIntakeFromStaging_] move helper error: %s', (e && e.stack) || e);
+    } catch (_) {}
+  }
+
+  try {
+    const caseFolderId = resolveCaseFolderId_(lineId, normalizedCaseId);
+    if (!caseFolderId) return;
+    const root = DriveApp.getFolderById(DRIVE_ROOT_ID);
+    const stagingIterator = root.getFoldersByName('_staging');
+    if (!stagingIterator.hasNext()) return;
+    const stagingRoot = stagingIterator.next();
+    const stack = [stagingRoot];
+    while (stack.length > 0) {
+      const folder = stack.pop();
+      const files = folder.getFiles();
+      while (files.hasNext()) {
+        const file = files.next();
+        if (
+          file.getMimeType() === 'application/json' &&
+          /^intake__/i.test(file.getName())
+        ) {
+          try {
+            const parentIds = [];
+            const parents = file.getParents();
+            while (parents.hasNext()) parentIds.push(parents.next().getId());
+            const request = {
+              addParents: caseFolderId,
+              supportsAllDrives: true,
+              supportsTeamDrives: true,
+            };
+            if (parentIds.length > 0) {
+              request.removeParents = parentIds.join(',');
+            }
+            Drive.Files.update({}, file.getId(), null, request);
+          } catch (err) {
+            try {
+              const caseFolder = DriveApp.getFolderById(caseFolderId);
+              caseFolder.addFile(file);
+              const parentsFallback = file.getParents();
+              while (parentsFallback.hasNext()) {
+                const p = parentsFallback.next();
+                if (p.getId() !== caseFolderId) {
+                  try {
+                    p.removeFile(file);
+                  } catch (_) {}
+                }
+              }
+            } catch (inner) {
+              try {
+                Logger.log('[bs_collectIntakeFromStaging_] fallback error: %s', (inner && inner.stack) || inner);
+              } catch (_) {}
+            }
+          }
+        }
+      }
+      const children = folder.getFolders();
+      while (children.hasNext()) stack.push(children.next());
+    }
+  } catch (err) {
+    try {
+      Logger.log('[bs_collectIntakeFromStaging_] error: %s', (err && err.stack) || err);
+    } catch (_) {}
+  }
+}
+
+function handleStatus_(lineId, caseId, hasIntake, userKey) {
+  const intakeFlag = !!hasIntake;
+  const normalizedCaseId = bs_normCaseId_(caseId);
+  if (!normalizedCaseId) {
+    return ContentService.createTextOutput(
+      JSON.stringify({ ok: true, caseId: '', intakeReady: false, hasIntake: intakeFlag })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+  let folderId = resolveCaseFolderId_(lineId, normalizedCaseId);
+  if (!folderId && userKey) {
+    try {
+      folderId = bs_ensureCaseFolder_(userKey, normalizedCaseId);
+    } catch (_) {}
+  }
+  const caseFolderReady = Boolean(folderId);
+  let intakeReady = folderId ? bs_isIntakeJsonReady_(folderId) : false;
+  if (!intakeReady) {
+    bs_collectIntakeFromStaging_(lineId, normalizedCaseId);
+    if (!folderId && userKey) {
+      try {
+        folderId = bs_resolveCaseFolderId_(userKey, normalizedCaseId, lineId);
+      } catch (_) {}
+    }
+    intakeReady = folderId ? bs_isIntakeJsonReady_(folderId) : false;
+  }
+  return ContentService.createTextOutput(
+    JSON.stringify({
+      ok: true,
+      caseId: normalizedCaseId,
+      intakeReady,
+      caseFolderReady: caseFolderReady || Boolean(folderId),
+      hasIntake: intakeFlag,
+    })
+  ).setMimeType(ContentService.MimeType.JSON);
 }
 
 /** ---------- doGet / doPost ---------- **/
@@ -410,27 +589,14 @@ function doPost(e) {
     const up = bs_upsertContact_({ userKey, lineId, displayName, email });
 
     if (action === 'status') {
-      // 受付済みかの確認（副作用なし）
       const sh = bs_getSheet_(SHEET_CONTACTS);
       const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
       const idx = bs_toIndexMap_(headers);
       const rowVals = sh.getRange(up.row, 1, 1, headers.length).getValues()[0];
       const intakeAt = 'intakeAt' in idx ? rowVals[idx['intakeAt']] : '';
       const activeCaseIdRaw = 'activeCaseId' in idx ? rowVals[idx['activeCaseId']] : '';
-      const activeCaseId = String(activeCaseIdRaw || '');
-      const hasIntake = !!intakeAt;
-      const caseFolderId = hasIntake && activeCaseId ? bs_resolveCaseFolderId_(userKey, activeCaseId, lineId) : '';
-      const intakeReady = caseFolderId ? bs_isIntakeJsonReady_(caseFolderId) : false;
-      return bs_jsonResponse_(
-        {
-          ok: true,
-          VER,
-          hasIntake,
-          activeCaseId: activeCaseId || null,
-          intakeReady,
-        },
-        200
-      );
+      const activeCaseId = bs_normCaseId_(activeCaseIdRaw);
+      return handleStatus_(lineId, activeCaseId, !!intakeAt, userKey);
     }
 
     if (action === 'intake_complete') {
@@ -440,11 +606,11 @@ function doPost(e) {
       const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
       const idx = bs_toIndexMap_(headers);
       const rowVals = sh.getRange(up.row, 1, 1, headers.length).getValues()[0];
-      let activeCaseId = rowVals[idx['activeCaseId']] || '';
+      let activeCaseId = bs_normCaseId_(rowVals[idx['activeCaseId']] || '');
       if (!activeCaseId) {
         ST = 'issue_case_id';
         const issued = bs_issueCaseId_(userKey, lineId);
-        activeCaseId = issued.caseId;
+        activeCaseId = bs_normCaseId_(issued.caseId);
       }
       ST = 'ensure_case_folder';
       const folderId = bs_ensureCaseFolder_(userKey, activeCaseId);
@@ -457,7 +623,7 @@ function doPost(e) {
       if (rc > 0) {
         const rows = shCases.getRange(2, 1, rc, h2.length).getValues();
         for (let i = rows.length - 1; i >= 0; i--) {
-          if (String(rows[i][i2['caseId']]) === String(activeCaseId)) {
+          if (bs_normCaseId_(rows[i][i2['caseId']]) === activeCaseId) {
             shCases.getRange(i + 2, i2['folderId'] + 1).setValue(folderId);
             shCases.getRange(i + 2, i2['status'] + 1).setValue('intake');
             break;
@@ -469,11 +635,7 @@ function doPost(e) {
       shContacts.getRange(up.row, up.idx['activeCaseId'] + 1).setValue(activeCaseId);
       bs_setContactIntakeAt_(lineId, new Date().toISOString());
       // _staging にある intake JSON を案件直下へ移送（存在すれば）
-      try {
-        if (typeof moveStagingIntakeJsonToCase_ === 'function') {
-          moveStagingIntakeJsonToCase_(lineId, activeCaseId);
-        }
-      } catch (_) {}
+      bs_collectIntakeFromStaging_(lineId, activeCaseId);
       const res = {
         ok: true,
         VER,

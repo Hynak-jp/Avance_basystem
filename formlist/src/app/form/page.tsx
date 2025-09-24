@@ -110,13 +110,14 @@ export default async function FormPage() {
   const origin =
     process.env.NEXT_PUBLIC_BASE_URL ||
     `${h.get('x-forwarded-proto') ?? 'http'}://${h.get('host')}`;
-  type StatusResponse = {
-    ok?: boolean;
-    caseId?: string | null;
-    intakeReady?: boolean;
-    hasIntake?: boolean;
-    activeCaseId?: string | null;
-  };
+type StatusResponse = {
+  ok?: boolean;
+  caseId?: string | null;
+  intakeReady?: boolean;
+  caseFolderReady?: boolean;
+  hasIntake?: boolean;
+  activeCaseId?: string | null;
+};
 
   let status: StatusResponse | null = null;
   try {
@@ -137,7 +138,10 @@ export default async function FormPage() {
 
   const rawCaseId = status?.caseId ?? status?.activeCaseId ?? null;
   const caseId = typeof rawCaseId === 'string' && rawCaseId.length > 0 ? rawCaseId : null;
-  const intakeReady = await fetchIntakeStatus(lineId, caseId);
+  const caseFolderReady = status?.caseFolderReady ?? Boolean(caseId);
+  const intakeReady = caseFolderReady
+    ? status?.intakeReady ?? (await fetchIntakeStatus(lineId, caseId))
+    : false;
   const intakeSubmitted = status?.hasIntake ?? Boolean(caseId);
   const caseReady = Boolean(caseId);
   const intakeFormIdEnv = process.env.NEXT_PUBLIC_INTAKE_FORM_ID;
@@ -151,7 +155,7 @@ export default async function FormPage() {
       preferredIntakeFormId && preferredIntakeFormId.length > 0
         ? f.formId === preferredIntakeFormId
         : index === 0;
-    const locked = !isIntakeForm && (!caseReady || !intakeReady);
+    const locked = !isIntakeForm && !caseFolderReady;
     let signedHref: string | undefined;
     if (!locked) {
       if (isIntakeForm) {
@@ -168,7 +172,7 @@ export default async function FormPage() {
     if (locked) {
       disabledReason = !caseReady
         ? '受付フォームの登録が完了するまでご利用いただけません。'
-        : '初回受付フォームの処理が完了するまでお待ちください。';
+        : '受付フォームを処理しています。しばらくお待ちください。';
     } else if (disabled) {
       disabledReason = '現在は利用できません。しばらくお待ちください。';
     }
@@ -191,9 +195,13 @@ export default async function FormPage() {
             ? '受付情報を確認しています。case_id が発行されると、ほかのフォームが利用できるようになります。'
             : 'まずは「受付フォーム」をご記入ください。受付が完了すると、ほかのフォームが利用できるようになります。'}
         </div>
+      ) : !caseFolderReady ? (
+        <div className="mb-6 rounded bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          受付フォームの情報を整理しています。まもなくほかのフォームが利用できるようになります。
+        </div>
       ) : !intakeReady ? (
         <div className="mb-6 rounded bg-yellow-100 px-4 py-3 text-sm text-yellow-800">
-          初回受付フォームの処理が完了するまで、ほかのフォームは操作できません。数分後に再度ご確認ください。
+          受付フォームの処理を継続しています。ほかのフォームは利用できますが、必要に応じて再読み込みしてください。
         </div>
       ) : null}
       <FormProgressClient lineId={lineId!} displayName={displayName} forms={formsWithHref} />

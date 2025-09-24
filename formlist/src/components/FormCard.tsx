@@ -31,7 +31,9 @@ export default function FormCard({
   // formId も渡しておくと、完了ページでどのフォームが送信されたか分かる
   const fallback = disabled
     ? undefined
-    : `${baseUrl}?line_id[0]=${encodeURIComponent(lineId)}&formId=${encodeURIComponent(formId)}&redirectUrl=${encodeURIComponent('https://formlist.vercel.app/done?formId=' + formId)}`;
+    : `${baseUrl}?line_id[0]=${encodeURIComponent(lineId)}&formId=${encodeURIComponent(
+        formId
+      )}&redirectUrl=${encodeURIComponent('https://formlist.vercel.app/done?formId=' + formId)}`;
   const signedHref = hrefOverride ?? fallback;
 
   const isDone = status === 'done';
@@ -71,11 +73,9 @@ export default function FormCard({
             title={disabledMsg}
             disabled
           >
-            準備中
+            初回受付中
           </button>
-          {disabledReason && (
-            <div className="mt-2 text-xs text-gray-600">{disabledReason}</div>
-          )}
+          {disabledReason && <div className="mt-2 text-xs text-gray-600">{disabledReason}</div>}
         </>
       ) : (
         <Link
