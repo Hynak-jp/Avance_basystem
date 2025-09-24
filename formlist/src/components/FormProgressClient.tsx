@@ -23,7 +23,7 @@ type Props = {
 
 export default function FormProgressClient({ lineId, displayName, forms }: Props) {
   const store = makeProgressStore(lineId)();
-  const doneCount = forms.filter((f) => store.statusByForm[f.formId] === 'done').length;
+  const doneCount = forms.filter((f) => f.completed || store.statusByForm[f.formId] === 'done').length;
 
   // Bootstrap on first render (client), redundant with server prefetch but safe
   // Stores nothing globally yet; ensures endpoint works per 2-2.
@@ -39,6 +39,14 @@ export default function FormProgressClient({ lineId, displayName, forms }: Props
     })();
   }, [lineId, displayName]);
 
+  React.useEffect(() => {
+    forms.forEach((form) => {
+      if (form.completed && store.statusByForm[form.formId] !== 'done') {
+        store.setStatus(form.formId, 'done');
+      }
+    });
+  }, [forms, store]);
+
   return (
     <>
       <ProgressBar total={forms.length} done={doneCount} />
@@ -50,12 +58,12 @@ export default function FormProgressClient({ lineId, displayName, forms }: Props
             title={form.title}
             description={form.description}
             baseUrl={form.baseUrl}
-          signedHref={form.signedHref}
-          lineId={lineId}
-          disabled={form.disabled}
-          disabledReason={form.disabledReason}
-          completed={form.completed}
-        />
+            signedHref={form.signedHref}
+            lineId={lineId}
+            disabled={form.disabled}
+            disabledReason={form.disabledReason}
+            completed={form.completed}
+          />
         ))}
       </div>
 

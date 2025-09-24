@@ -209,7 +209,11 @@ type StatusResponse = {
         <div className="mb-6 rounded bg-yellow-100 px-4 py-3 text-sm text-yellow-800">
           受付フォームの処理を継続しています。ほかのフォームは利用できますが、必要に応じて再読み込みしてください。
         </div>
-      ) : null}
+      ) : (
+        <div className="mb-6 rounded bg-green-100 px-4 py-3 text-sm text-green-900">
+          初回受付フォームの処理が完了しました。提出フォームの入力へと進んでください。
+        </div>
+      )}
       <FormProgressClient lineId={lineId!} displayName={displayName} forms={formsWithHref} />
     </main>
   );
