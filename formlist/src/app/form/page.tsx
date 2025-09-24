@@ -89,9 +89,10 @@ export default async function FormPage() {
     `${h.get('x-forwarded-proto') ?? 'http'}://${h.get('host')}`;
   type StatusResponse = {
     ok?: boolean;
+    caseId?: string | null;
+    intakeReady?: boolean;
     hasIntake?: boolean;
     activeCaseId?: string | null;
-    intakeReady?: boolean;
   };
 
   let status: StatusResponse | null = null;
@@ -111,9 +112,11 @@ export default async function FormPage() {
     status = null;
   }
 
-  const hasIntake = status?.hasIntake ?? false;
-  const intakeReady = status?.intakeReady ?? false;
-  const activeCaseId = status?.activeCaseId || '0001';
+  const rawCaseId = status?.caseId ?? status?.activeCaseId ?? null;
+  const caseId = typeof rawCaseId === 'string' && rawCaseId.length > 0 ? rawCaseId : null;
+  const intakeReady = caseId ? status?.intakeReady ?? false : false;
+  const intakeSubmitted = status?.hasIntake ?? Boolean(caseId);
+  const caseReady = Boolean(caseId);
   const intakeFormIdEnv = process.env.NEXT_PUBLIC_INTAKE_FORM_ID;
   const fallbackIntakeFormId = forms[0]?.formId;
   const preferredIntakeFormId =
@@ -125,22 +128,33 @@ export default async function FormPage() {
       preferredIntakeFormId && preferredIntakeFormId.length > 0
         ? f.formId === preferredIntakeFormId
         : index === 0;
-    const href = isIntakeForm
-      ? hasIntake
-        ? makeFormUrl(f.baseUrl, lineId!, activeCaseId)
-        : makeIntakeUrl(intakeBase, intakeRedirect)
-      : hasIntake
-      ? makeFormUrl(f.baseUrl, lineId!, activeCaseId)
-      : undefined;
-    const disabled = hasIntake ? !intakeReady && !isIntakeForm : !isIntakeForm;
-    const disabledReason = !hasIntake
-      ? '受付フォームの登録が完了するまでご利用いただけません。'
-      : disabled
-      ? '初回受付フォームの処理が完了するまでお待ちください。'
-      : undefined;
+    let signedHref: string | undefined;
+    if (isIntakeForm) {
+      signedHref = caseReady
+        ? makeFormUrl(f.baseUrl, lineId!, caseId!)
+        : makeIntakeUrl(intakeBase, intakeRedirect);
+    } else if (caseReady && intakeReady) {
+      signedHref = makeFormUrl(f.baseUrl, lineId!, caseId!);
+    }
+
+    let disabled = false;
+    let disabledReason: string | undefined;
+    if (!isIntakeForm) {
+      if (!caseReady) {
+        disabled = true;
+        disabledReason = '受付フォームの登録が完了するまでご利用いただけません。';
+      } else if (!intakeReady) {
+        disabled = true;
+        disabledReason = '初回受付フォームの処理が完了するまでお待ちください。';
+      }
+    }
+    if (!disabled && !signedHref) {
+      disabled = true;
+    }
+
     return {
       ...f,
-      href,
+      signedHref,
       disabled,
       disabledReason,
     };
@@ -150,9 +164,11 @@ export default async function FormPage() {
     <main className="container mx-auto px-4 py-10">
       <h1 className="text-3xl font-bold mb-6">提出フォーム一覧</h1>
       <UserInfo />
-      {!hasIntake ? (
+      {!caseReady ? (
         <div className="mb-6 rounded bg-blue-50 px-4 py-3 text-sm text-blue-900">
-          まずは「受付フォーム」をご記入ください。受付が完了すると、ほかのフォームが利用できるようになります。
+          {intakeSubmitted
+            ? '受付情報を確認しています。case_id が発行されると、ほかのフォームが利用できるようになります。'
+            : 'まずは「受付フォーム」をご記入ください。受付が完了すると、ほかのフォームが利用できるようになります。'}
         </div>
       ) : !intakeReady ? (
         <div className="mb-6 rounded bg-yellow-100 px-4 py-3 text-sm text-yellow-800">
