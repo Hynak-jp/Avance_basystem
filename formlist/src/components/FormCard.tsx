@@ -33,9 +33,13 @@ export default function FormCard({
   // formId も渡しておくと、完了ページでどのフォームが送信されたか分かる
   const fallback = disabled
     ? undefined
-    : `${baseUrl}?line_id[0]=${encodeURIComponent(lineId)}&formId=${encodeURIComponent(
-        formId
-      )}&redirectUrl=${encodeURIComponent('https://formlist.vercel.app/done?formId=' + formId)}`;
+    : (() => {
+        const url = new URL(baseUrl);
+        url.searchParams.set('line_id[0]', lineId);
+        url.searchParams.set('form_id', formId);
+        url.searchParams.set('redirect_url', `https://formlist.vercel.app/done?formId=${formId}`);
+        return url.toString();
+      })();
   const signedHref = hrefOverride ?? fallback;
 
   const isOverrideDone = completed ?? false;

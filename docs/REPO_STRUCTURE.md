@@ -20,7 +20,7 @@ Codex へのお願い（常設メモ）：
 - **formlist/**（Next.js, Vercel 想定）
   - LINE で認証（NextAuth）。ログイン後に提出フォーム一覧（外部 FormMailer）を表示
   - 署名付き URL（`lineId, caseId, ts, sig`）を生成して外部フォームへ遷移
-  - 送信完了後は `redirectUrl`（本アプリの `/done`）に戻し、ローカル進捗を更新
+  - 送信完了後は `redirect_url`（本アプリの `/done`）に戻し、ローカル進捗を更新
   - 画像/OCR 抽出の社内 API: `/api/extract` を提供（OpenAI API を利用）
 - **gas/**（Google Apps Script）
   - Gmail ラベルを監視して Drive へ「浅い構造」で自動整理、JSON 保存、台帳スプレッドシート更新
@@ -88,7 +88,7 @@ formlist/
 
 - LINE での認証（NextAuth + LINE）。JWT に `lineId` を格納
 - フォーム一覧 `/form` で必要フォームを列挙し、外部 FormMailer へ遷移
-  - 遷移 URL には `line_id[0]`, `formId`, `redirectUrl=/done?formId=...` を付与
+  - 遷移 URL には `line_id[0]`, `form_id`, `redirect_url=/done?formId=...` を付与
   - `/done` 受信でローカル進捗を `done` に更新 → `/form` へ戻す
 - `/api/extract` は GAS からの画像抽出要求を受け、OpenAI Chat Completions で JSON を返す
 - `/api/status` と `/api/intake/complete` で intake ゲートを管理（採番は intake 完了時）

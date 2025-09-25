@@ -1269,6 +1269,14 @@ function processLabel(labelName) {
   threads.forEach((thread) => {
     // すでに処理済み/エラーのラベルが付いていたら ToProcess を外してスキップ
     const labs = thread.getLabels().map((l) => l.getName());
+    const queueLabels = typeof getFormQueueLabels_ === 'function' ? getFormQueueLabels_() : [];
+    const lockLabelName = typeof getFormLockLabel_ === 'function' ? getFormLockLabel_() : 'BAS/lock';
+    if (
+      queueLabels.some((name) => labs.indexOf(name) >= 0) ||
+      labs.indexOf(lockLabelName) >= 0
+    ) {
+      return;
+    }
     if (labs.indexOf(LABEL_PROCESSED) >= 0 || labs.indexOf(LABEL_ERROR) >= 0) {
       try {
         thread.removeLabel(labelToProcess);

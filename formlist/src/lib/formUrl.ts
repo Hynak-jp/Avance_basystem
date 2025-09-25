@@ -1,7 +1,17 @@
 // src/lib/formUrl.ts
 import crypto from 'crypto';
 
-export function makeFormUrl(baseUrl: string, lineId: string, caseId: string) {
+type MakeFormUrlOptions = {
+  redirectUrl?: string;
+  formId?: string;
+};
+
+export function makeFormUrl(
+  baseUrl: string,
+  lineId: string,
+  caseId: string,
+  options: MakeFormUrlOptions = {}
+) {
   const ts = Date.now();
   const secret = process.env.BOOTSTRAP_SECRET!;
 
@@ -12,6 +22,13 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string) {
     ts: String(ts),
     sig: crypto.createHmac('sha256', secret).update(`${lineId}|${caseId}|${ts}`).digest('hex'),
   });
+
+  if (options.redirectUrl) {
+    params.set('redirect_url', options.redirectUrl);
+  }
+  if (options.formId) {
+    params.set('form_id', options.formId);
+  }
 
   return `${baseUrl}?${params.toString()}`;
 }

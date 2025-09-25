@@ -5,18 +5,23 @@ function setupTriggers() {
     // 既存トリガーを一旦削除
     ScriptApp.getProjectTriggers().forEach((t) => {
       const fn = t.getHandlerFunction();
-      if (fn === 'cron_1min' || fn === 'run_ProcessInbox_S2002') {
+      if (
+        fn === 'cron_1min' ||
+        fn === 'run_ProcessInbox_S2002' ||
+        fn === 'run_ProcessInbox_S2010_P1' ||
+        fn === 'run_ProcessInbox_AllForms'
+      ) {
         ScriptApp.deleteTrigger(t);
       }
     });
 
+    // 共通フォーム Intake ルーター
+    ScriptApp.newTrigger('run_ProcessInbox_AllForms').timeBased().everyMinutes(1).create();
+
     // Gドライブ整理（既存）
     ScriptApp.newTrigger('cron_1min').timeBased().everyMinutes(5).create();
 
-    // s2002_draft.js の処理（S2002 Intake）
-    ScriptApp.newTrigger('run_ProcessInbox_S2002').timeBased().everyMinutes(5).create();
-
-    Logger.log('Triggers set: cron_1min, run_ProcessInbox_S2002');
+    Logger.log('Triggers set: run_ProcessInbox_AllForms, cron_1min');
   } finally {
     lock.releaseLock();
   }
@@ -34,12 +39,12 @@ function removeAllTriggers() {
 function ensureTriggers() {
   const have = new Set(ScriptApp.getProjectTriggers().map((t) => t.getHandlerFunction()));
   let created = 0;
-  if (!have.has('cron_1min')) {
-    ScriptApp.newTrigger('cron_1min').timeBased().everyMinutes(5).create();
+  if (!have.has('run_ProcessInbox_AllForms')) {
+    ScriptApp.newTrigger('run_ProcessInbox_AllForms').timeBased().everyMinutes(1).create();
     created++;
   }
-  if (!have.has('run_ProcessInbox_S2002')) {
-    ScriptApp.newTrigger('run_ProcessInbox_S2002').timeBased().everyMinutes(5).create();
+  if (!have.has('cron_1min')) {
+    ScriptApp.newTrigger('cron_1min').timeBased().everyMinutes(5).create();
     created++;
   }
   Logger.log('ensureTriggers: have=%s created=%s', JSON.stringify(Array.from(have)), created);

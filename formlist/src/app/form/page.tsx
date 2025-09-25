@@ -43,7 +43,7 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
       baseUrl: 'https://business.form-mailer.jp/fms/dde2787c309542',
     },
     {
-      formId: '308466',
+      formId: '308949',
       title: 'S2010 陳述書提出フォーム(2/3)',
       description: '破産申立てに至った事情を記入します',
       baseUrl: 'https://business.form-mailer.jp/fms/f16a6fa1308949',
@@ -110,14 +110,14 @@ export default async function FormPage() {
   const origin =
     process.env.NEXT_PUBLIC_BASE_URL ||
     `${h.get('x-forwarded-proto') ?? 'http'}://${h.get('host')}`;
-type StatusResponse = {
-  ok?: boolean;
-  caseId?: string | null;
-  intakeReady?: boolean;
-  caseFolderReady?: boolean;
-  hasIntake?: boolean;
-  activeCaseId?: string | null;
-};
+  type StatusResponse = {
+    ok?: boolean;
+    caseId?: string | null;
+    intakeReady?: boolean;
+    caseFolderReady?: boolean;
+    hasIntake?: boolean;
+    activeCaseId?: string | null;
+  };
 
   let status: StatusResponse | null = null;
   try {
@@ -157,13 +157,21 @@ type StatusResponse = {
         : index === 0;
     const locked = !isIntakeForm && !caseFolderReady;
     let signedHref: string | undefined;
+    const redirectForForm = `${origin}/done?formId=${f.formId}`;
     if (!locked) {
       if (isIntakeForm) {
-        signedHref = caseReady && caseId
-          ? makeFormUrl(f.baseUrl, lineId!, caseId)
-          : makeIntakeUrl(intakeBase, intakeRedirect);
+        signedHref =
+          caseReady && caseId
+            ? makeFormUrl(f.baseUrl, lineId!, caseId, {
+                redirectUrl: redirectForForm,
+                formId: f.formId,
+              })
+            : makeIntakeUrl(intakeBase, intakeRedirect);
       } else if (caseReady && caseId) {
-        signedHref = makeFormUrl(f.baseUrl, lineId!, caseId);
+        signedHref = makeFormUrl(f.baseUrl, lineId!, caseId, {
+          redirectUrl: redirectForForm,
+          formId: f.formId,
+        });
       }
     }
 
