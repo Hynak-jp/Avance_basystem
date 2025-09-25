@@ -8,7 +8,9 @@ export default function DoneClient({ lineId }: { lineId: string }) {
   const search = useSearchParams();
   const router = useRouter();
   const formId = search.get('formId') || 'unknown';
+  const formKeyParam = search.get('formKey') || '';
   const form = search.get('form') || '';
+  const storeKey = formKeyParam || formId || 'unknown';
 
   const store = makeProgressStore(lineId)();
 
@@ -29,7 +31,7 @@ export default function DoneClient({ lineId }: { lineId: string }) {
           try { data = (await r.json()) as { ok?: boolean }; } catch {}
           console.log('intake_complete:', r.status, data);
           if (r.ok && (data?.ok ?? true)) {
-            store.setStatus(formId, 'done');
+            store.setStatus(storeKey, 'done');
             router.replace('/form');
             return;
           }
@@ -38,11 +40,11 @@ export default function DoneClient({ lineId }: { lineId: string }) {
         }
       }
       // フォールバック：受付以外 or 失敗時も一覧へ戻す
-      store.setStatus(formId, 'done');
+      store.setStatus(storeKey, 'done');
       router.replace('/form');
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form, formId, lineId]);
+  }, [form, formId, formKeyParam, lineId, storeKey]);
 
   return <p>送信ありがとうございました。処理が完了すると一覧に戻ります…</p>;
 }

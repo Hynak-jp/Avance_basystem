@@ -15,7 +15,14 @@ export const fetchCache = 'force-no-store';
 export const runtime = 'nodejs';
 
 // TODO: 必要に応じて /api/forms に移行
-type FormDef = { formId: string; title: string; description: string; baseUrl: string };
+type FormDef = {
+  formId: string;
+  title: string;
+  description: string;
+  baseUrl: string;
+  formKey?: string;
+  storeKey?: string;
+};
 async function loadForms(): Promise<{ forms: FormDef[] }> {
   const forms: FormDef[] = [
     {
@@ -23,54 +30,72 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
       title: '初回受付フォーム',
       description: '初回受付の情報を記入します',
       baseUrl: 'https://business.form-mailer.jp/fms/47a7602b302516',
+      formKey: 'intake_form',
+      storeKey: 'intake_form',
     },
     {
       formId: '308335',
       title: 'S2002 破産手続開始申立書',
       description: '破産手続開始申立書の情報を記入します',
       baseUrl: 'https://business.form-mailer.jp/fms/d9b655cb308335',
+      formKey: 's2002_userform',
+      storeKey: 's2002_userform',
     },
     {
       formId: '308463',
       title: 'S2005 債権者一覧表',
       description: '債権者情報を記入します',
       baseUrl: 'https://business.form-mailer.jp/lp/47a7602b302516',
+      formKey: 's2005_creditors',
+      storeKey: 's2005_creditors',
     },
     {
       formId: '309542',
       title: 'S2010 陳述書提出フォーム(1/3)',
       description: '経歴等を記入します',
       baseUrl: 'https://business.form-mailer.jp/fms/dde2787c309542',
+      formKey: 's2010_p1_career',
+      storeKey: 's2010_p1_career',
     },
     {
       formId: '308949',
       title: 'S2010 陳述書提出フォーム(2/3)',
       description: '破産申立てに至った事情を記入します',
       baseUrl: 'https://business.form-mailer.jp/fms/f16a6fa1308949',
+      formKey: 's2010_p2_cause',
+      storeKey: 's2010_p2_cause',
     },
     {
       formId: '310055',
       title: 'S2010 陳述書提出フォーム(3/3)',
       description: '免責不許可事由に関する報告を記入します',
       baseUrl: 'https://business.form-mailer.jp/fms/3bbcb828310055',
+      formKey: 's2010_p3_discharge',
+      storeKey: 's2010_p3_discharge',
     },
     {
       formId: '308466',
       title: 'S2011 家計収支提出フォーム(1/2)',
       description: '申立前２か月分の家計収支表を記入します',
       baseUrl: 'https://business.form-mailer.jp/fms/0f10ce9b307065',
+      formKey: 's2011_income_month1',
+      storeKey: 's2011_income_month1',
     },
     {
       formId: '308466',
       title: 'S2011 家計収支提出フォーム(2/2)',
       description: '申立前2か月分の家計収支表を記入します',
       baseUrl: 'https://business.form-mailer.jp/fms/0f10ce9b307065',
+      formKey: 's2011_income_month2',
+      storeKey: 's2011_income_month2',
     },
     {
       formId: '307065',
       title: '書類提出フォーム',
       description: '給与明細などの書類をアップロードします',
       baseUrl: 'https://business.form-mailer.jp/fms/0f10ce9b307065',
+      formKey: 'supporting_documents',
+      storeKey: 'supporting_documents',
     },
   ];
   return { forms };
@@ -157,7 +182,10 @@ export default async function FormPage() {
         : index === 0;
     const locked = !isIntakeForm && !caseFolderReady;
     let signedHref: string | undefined;
-    const redirectForForm = `${origin}/done?formId=${f.formId}`;
+    const redirectUrl = new URL('/done', origin);
+    redirectUrl.searchParams.set('formId', f.formId);
+    if (f.formKey) redirectUrl.searchParams.set('formKey', f.formKey);
+    const redirectForForm = redirectUrl.toString();
     if (!locked) {
       if (isIntakeForm) {
         signedHref =
@@ -196,6 +224,7 @@ export default async function FormPage() {
       disabled,
       disabledReason,
       completed: intakeCompleted,
+      storeKey: f.storeKey || f.formKey || f.formId,
     };
   });
 
@@ -222,7 +251,12 @@ export default async function FormPage() {
           初回受付フォームの処理が完了しました。提出フォームの入力へと進んでください。
         </div>
       )}
-      <FormProgressClient lineId={lineId!} displayName={displayName} forms={formsWithHref} />
+      <FormProgressClient
+        lineId={lineId!}
+        displayName={displayName}
+        caseId={caseId}
+        forms={formsWithHref}
+      />
     </main>
   );
 }

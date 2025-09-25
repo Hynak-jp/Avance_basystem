@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { makeProgressStore, FormStatus } from '@/lib/progressStore';
+import type { CaseFormStatus } from '@/hooks/useCaseFormsStatus';
 
 type Props = {
   formId: string;
@@ -13,6 +14,9 @@ type Props = {
   disabled?: boolean;
   disabledReason?: string;
   completed?: boolean;
+  formKey?: string;
+  storeKey?: string;
+  serverStatus?: CaseFormStatus;
 };
 
 export default function FormCard({
@@ -25,9 +29,13 @@ export default function FormCard({
   disabled,
   disabledReason,
   completed,
+  formKey,
+  storeKey,
+  serverStatus,
 }: Props) {
+  const progressKey = storeKey || formKey || formId;
   const store = makeProgressStore(lineId)();
-  const status: FormStatus = store.statusByForm[formId] || 'not_started';
+  const status: FormStatus = store.statusByForm[progressKey] || 'not_started';
   // LIFFの仕様上、URLに改行やスペースが入るとエラーになるため、encodeURIComponentでエンコードする
   // redirectUrl は送信後に戻ってくるURL（ここでは完了ページに戻す）
   // formId も渡しておくと、完了ページでどのフォームが送信されたか分かる
@@ -35,29 +43,67 @@ export default function FormCard({
     ? undefined
     : (() => {
         const url = new URL(baseUrl);
+        const redirectUrl = new URL('https://formlist.vercel.app/done');
+        redirectUrl.searchParams.set('formId', formId);
+        if (formKey) redirectUrl.searchParams.set('formKey', formKey);
         url.searchParams.set('line_id[0]', lineId);
         url.searchParams.set('form_id', formId);
-        url.searchParams.set('redirect_url', `https://formlist.vercel.app/done?formId=${formId}`);
+        url.searchParams.set('redirect_url', redirectUrl.toString());
         return url.toString();
       })();
   const signedHref = hrefOverride ?? fallback;
 
-  const isOverrideDone = completed ?? false;
-  const effectiveStatus: FormStatus = isOverrideDone ? 'done' : status;
+  const overrideDone = completed ?? false;
+  let effectiveStatus: FormStatus = overrideDone ? 'done' : status;
+
+  if (serverStatus) {
+    if (!serverStatus.canEdit && (serverStatus.status === 'submitted' || serverStatus.status === 'closed')) {
+      effectiveStatus = 'done';
+    } else if (serverStatus.status === 'reopened' && effectiveStatus === 'done') {
+      effectiveStatus = 'in_progress';
+    }
+  }
+
   const isDone = effectiveStatus === 'done';
-  const isClickable = !!signedHref && !disabled && !isDone;
+  const serverCanEdit = serverStatus ? serverStatus.canEdit : undefined;
+  const baseDisabled = disabled || !signedHref;
+  const finalDisabled = serverCanEdit !== undefined ? !serverCanEdit || !signedHref : baseDisabled;
+  const isClickable = !!signedHref && !finalDisabled && !isDone;
   const isDisabled = !isClickable && !isDone;
+
   const containerClass = `rounded-lg border p-4 ${
     isClickable ? '' : 'bg-gray-50 text-gray-500 opacity-60 pointer-events-none'
   }`;
-  const label = isDone
+  let label = isDone
     ? '（完了）'
     : isDisabled
     ? '（受付処理中）'
     : effectiveStatus === 'in_progress'
     ? '（入力中）'
     : '（未入力）';
-  const disabledMsg = disabledReason || '現在は利用できません。しばらくお待ちください。';
+
+  if (serverStatus) {
+    if (!serverStatus.canEdit && (serverStatus.status === 'submitted' || serverStatus.status === 'closed')) {
+      label = '（送信済み）';
+    } else if (serverStatus.status === 'reopened') {
+      label = '（再入力可）';
+    } else if (!serverStatus.canEdit) {
+      label = '（受付処理中）';
+    }
+  }
+
+  const disabledMsg = (() => {
+    if (serverStatus && !serverStatus.canEdit && serverStatus.locked_reason) {
+      return serverStatus.locked_reason;
+    }
+    return disabledReason || '現在は利用できません。しばらくお待ちください。';
+  })();
+
+  const reopenedHint = serverStatus?.status === 'reopened'
+    ? serverStatus.reopen_until
+      ? `事務所により再入力が許可されています（期限：${serverStatus.reopen_until}）`
+      : '事務所により再入力が許可されています'
+    : '';
 
   return (
     <div className={containerClass}>
@@ -69,10 +115,10 @@ export default function FormCard({
       {isDone ? (
         <button
           className="px-3 py-1.5 bg-gray-300 text-gray-600 rounded cursor-not-allowed"
-          title={isOverrideDone ? '受付フォームは完了しています' : '送信済みのため再送できません'}
+          title={overrideDone ? '受付フォームは完了しています' : '送信済みのため再送できません'}
           disabled
         >
-          {isOverrideDone ? '受付完了しました' : '送信済み'}
+          {overrideDone ? '受付完了しました' : '送信済み'}
         </button>
       ) : !isClickable ? (
         <>
@@ -83,17 +129,20 @@ export default function FormCard({
           >
             初回受付中
           </button>
-          {disabledReason && <div className="mt-2 text-xs text-gray-600">{disabledReason}</div>}
+          {disabledMsg && <div className="mt-2 text-xs text-gray-600">{disabledMsg}</div>}
         </>
       ) : (
         <Link
           href={signedHref}
           prefetch={false}
-          onClick={() => store.setStatus(formId, 'in_progress')}
+          onClick={() => store.setStatus(progressKey, 'in_progress')}
           className="inline-block px-3 py-2 rounded bg-black text-white"
         >
           開く
         </Link>
+      )}
+      {reopenedHint && isClickable && (
+        <div className="mt-2 text-xs text-gray-600">{reopenedHint}</div>
       )}
     </div>
   );

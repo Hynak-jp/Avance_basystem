@@ -145,6 +145,19 @@ function run_ProcessInbox_AllForms() {
         const filePath = saveSubmissionJson_(caseInfo.folderId, parsed);
         Logger.log('[Intake] saved %s', filePath);
 
+        if (typeof recordSubmission_ === 'function') {
+          try {
+            recordSubmission_({
+              caseId: caseInfo.caseId || meta.case_id,
+              form_key: actualKey,
+              submission_id: meta.submission_id || '',
+              json_path: filePath,
+            });
+          } catch (recErr) {
+            Logger.log('[Intake] recordSubmission_ error: %s', (recErr && recErr.stack) || recErr);
+          }
+        }
+
         if (typeof updateCasesRow_ === 'function') {
           const basePatch = {};
           basePatch.lastActivity = new Date();

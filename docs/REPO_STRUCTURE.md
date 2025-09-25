@@ -99,6 +99,7 @@ formlist/
 - NextAuth: `NEXTAUTH_URL`, `NEXTAUTH_SECRET`, `LINE_CLIENT_ID`, `LINE_CLIENT_SECRET`
 - 抽出 API: `OPENAI_API_KEY`, `OPENAI_MODEL`（例: gpt-4oi）, `EXTRACT_SECRET`, `ALLOW_ORIGIN`
 - GAS 連携: `GAS_ENDPOINT`, `BOOTSTRAP_SECRET`（bootstrap と署名付きURL用）
+- Sheets ステータス API: `BAS_API_ENDPOINT`, `BAS_API_HMAC_SECRET`（GAS status_api.js と共有）
 - 参考（旧ヘルパ）: `NEXT_PUBLIC_GAS_URL`, `GAS_SHARED_SECRET`
 
 > 注意：`.env.local` に機微情報が含まれるため、公開リポジトリではコミットしないこと。

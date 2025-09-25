@@ -486,13 +486,7 @@ function handleStatus_(lineId, caseId, hasIntake, userKey) {
   ).setMimeType(ContentService.MimeType.JSON);
 }
 
-/** ---------- doGet / doPost ---------- **/
-function doGet(e) {
-  return ContentService.createTextOutput(
-    JSON.stringify({ ok: true, VER: 'dbg-final' })
-  ).setMimeType(ContentService.MimeType.JSON);
-}
-
+/** ---------- doPost ---------- **/
 function doPost(e) {
   let ST = 'enter';
   try {
