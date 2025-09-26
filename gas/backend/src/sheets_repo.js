@@ -11,10 +11,10 @@ const SHEETS_REPO_SUBMISSIONS = SHEETS_REPO_PROPS.getProperty('SHEET_SUBMISSIONS
 const SHEETS_REPO_CASES = SHEETS_REPO_PROPS.getProperty('SHEET_CASES') || 'cases';
 
 const SHEETS_REPO_CASES_FORMS_HEADERS = [
-  'caseId',
+  'case_id',
   'form_key',
   'status',
-  'canEdit',
+  'can_edit',
   'reopened_at',
   'reopened_by',
   'locked_reason',
@@ -23,7 +23,8 @@ const SHEETS_REPO_CASES_FORMS_HEADERS = [
 ];
 
 const SHEETS_REPO_SUBMISSIONS_HEADERS = [
-  'caseId',
+  'case_id',
+  'case_key',
   'form_key',
   'seq',
   'submission_id',
@@ -31,6 +32,51 @@ const SHEETS_REPO_SUBMISSIONS_HEADERS = [
   'supersedes_seq',
   'json_path',
 ];
+
+function sheetsRepo_aliases_(key) {
+  if (typeof bs_headerAliases_ === 'function') return bs_headerAliases_(key);
+  const value = String(key == null ? '' : key).trim();
+  if (!value) return [];
+  const lower = value.toLowerCase();
+  const snake = lower
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  const camel = snake.replace(/_([a-z0-9])/g, function (_, c) {
+    return c.toUpperCase();
+  });
+  const pascal = camel ? camel.charAt(0).toUpperCase() + camel.slice(1) : '';
+  const flat = snake.replace(/_/g, '');
+  const aliases = new Set([value, lower, snake, camel, pascal, flat, flat.toLowerCase()]);
+  return Array.from(aliases).filter(function (v) {
+    return !!v;
+  });
+}
+
+function sheetsRepo_getValue_(obj, key) {
+  if (!obj) return undefined;
+  const aliases = sheetsRepo_aliases_(key);
+  for (let i = 0; i < aliases.length; i++) {
+    const alias = aliases[i];
+    if (Object.prototype.hasOwnProperty.call(obj, alias)) {
+      return obj[alias];
+    }
+  }
+  return undefined;
+}
+
+function sheetsRepo_assignAliases_(target, key, value) {
+  const aliases = sheetsRepo_aliases_(key);
+  for (let i = 0; i < aliases.length; i++) {
+    const alias = aliases[i];
+    if (!Object.prototype.hasOwnProperty.call(target, alias)) {
+      target[alias] = value;
+    }
+  }
+  if (aliases.length && !Object.prototype.hasOwnProperty.call(target, key)) {
+    target[key] = value;
+  }
+}
 
 function sheetsRepo_ensureSheet_(name, headers) {
   const sheet = bs_getSheet_(name);
@@ -63,16 +109,20 @@ function sheetsRepo_readAll_(sheetName, headers) {
   return values.map(function (row) {
     const obj = {};
     headers.forEach(function (key, idx) {
-      obj[key] = row[idx];
+      sheetsRepo_assignAliases_(obj, key, row[idx]);
     });
     return obj;
   });
 }
 
 function upsertCasesForms_(row) {
-  if (!row || !row.caseId || !row.form_key) {
-    throw new Error('upsertCasesForms_: caseId and form_key are required');
+  const caseIdRaw = sheetsRepo_getValue_(row, 'case_id');
+  const formKeyRaw = sheetsRepo_getValue_(row, 'form_key');
+  if (!caseIdRaw || !formKeyRaw) {
+    throw new Error('upsertCasesForms_: case_id and form_key are required');
   }
+  const caseId = String(caseIdRaw).trim();
+  const formKey = String(formKeyRaw).trim();
   const sheet = sheetsRepo_ensureSheet_(SHEETS_REPO_CASES_FORMS, SHEETS_REPO_CASES_FORMS_HEADERS);
   const headers = SHEETS_REPO_CASES_FORMS_HEADERS;
   const lastRow = sheet.getLastRow();
@@ -81,12 +131,12 @@ function upsertCasesForms_(row) {
   if (lastRow >= 2) {
     const range = sheet.getRange(2, 1, lastRow - 1, lastCol);
     const values = range.getValues();
-    const caseIdx = headers.indexOf('caseId');
+    const caseIdx = headers.indexOf('case_id');
     const formIdx = headers.indexOf('form_key');
     for (let i = 0; i < values.length; i++) {
       const rowCase = String(values[i][caseIdx] || '').trim();
       const rowForm = String(values[i][formIdx] || '').trim();
-      if (rowCase === String(row.caseId).trim() && rowForm === String(row.form_key).trim()) {
+      if (rowCase === caseId && rowForm === formKey) {
         targetRow = i + 2;
         break;
       }
@@ -95,14 +145,27 @@ function upsertCasesForms_(row) {
 
   const baseRecord = {
     status: '',
-    canEdit: false,
+    can_edit: false,
     reopened_at: '',
     reopened_by: '',
     locked_reason: '',
     reopen_until: '',
-    updated_at: new Date(),
+    updated_at: new Date().toISOString(),
   };
-  const payload = Object.assign({}, baseRecord, row, { updated_at: new Date() });
+
+  const normalized = {};
+  headers.forEach(function (key) {
+    const incoming = sheetsRepo_getValue_(row, key);
+    if (incoming !== undefined && incoming !== null) {
+      normalized[key] = incoming;
+    }
+  });
+
+  normalized['case_id'] = caseId;
+  normalized['form_key'] = formKey;
+  normalized['updated_at'] = new Date().toISOString();
+
+  const payload = Object.assign({}, baseRecord, normalized);
 
   if (targetRow > 0) {
     const currentValues = sheet.getRange(targetRow, 1, 1, lastCol).getValues()[0];
@@ -124,17 +187,20 @@ function upsertCasesForms_(row) {
 
 function getCaseForms_(caseId) {
   if (!caseId) return [];
+  const want = String(caseId).trim();
   return sheetsRepo_readAll_(SHEETS_REPO_CASES_FORMS, SHEETS_REPO_CASES_FORMS_HEADERS).filter(function (row) {
-    return String(row.caseId || '').trim() === String(caseId).trim();
+    return String(sheetsRepo_getValue_(row, 'case_id') || '').trim() === want;
   });
 }
 
 function getLastSeq_(caseId, form_key) {
   if (!caseId || !form_key) return 0;
+  const wantCase = String(caseId).trim();
+  const wantForm = String(form_key).trim();
   const rows = sheetsRepo_readAll_(SHEETS_REPO_SUBMISSIONS, SHEETS_REPO_SUBMISSIONS_HEADERS).filter(function (row) {
     return (
-      String(row.caseId || '').trim() === String(caseId).trim() &&
-      String(row.form_key || '').trim() === String(form_key).trim()
+      String(sheetsRepo_getValue_(row, 'case_id') || '').trim() === wantCase &&
+      String(sheetsRepo_getValue_(row, 'form_key') || '').trim() === wantForm
     );
   });
   if (!rows.length) return 0;
@@ -150,13 +216,20 @@ function getLastSeq_(caseId, form_key) {
 }
 
 function insertSubmission_(row) {
-  if (!row || !row.caseId || !row.form_key) {
-    throw new Error('insertSubmission_: missing caseId or form_key');
+  const caseIdRaw = sheetsRepo_getValue_(row, 'case_id');
+  const formKeyRaw = sheetsRepo_getValue_(row, 'form_key');
+  if (!caseIdRaw || !formKeyRaw) {
+    throw new Error('insertSubmission_: missing case_id or form_key');
   }
   const sheet = sheetsRepo_ensureSheet_(SHEETS_REPO_SUBMISSIONS, SHEETS_REPO_SUBMISSIONS_HEADERS);
   const headers = SHEETS_REPO_SUBMISSIONS_HEADERS;
+  const normalized = Object.assign({}, row, {
+    case_id: String(caseIdRaw).trim(),
+    form_key: String(formKeyRaw).trim(),
+  });
   const ordered = headers.map(function (key) {
-    return Object.prototype.hasOwnProperty.call(row, key) ? row[key] : '';
+    const value = sheetsRepo_getValue_(normalized, key);
+    return value !== undefined && value !== null ? value : '';
   });
   sheet.appendRow(ordered);
 }
@@ -180,4 +253,16 @@ function lookupCaseIdByLineId_(lineId) {
     }
   }
   return null;
+}
+
+function sheetsRepo_hasSubmission_(caseId, formKey, submissionId) {
+  if (!caseId || !formKey || !submissionId) return false;
+  const rows = sheetsRepo_readAll_(SHEETS_REPO_SUBMISSIONS, SHEETS_REPO_SUBMISSIONS_HEADERS);
+  return rows.some(function (row) {
+    return (
+      String(sheetsRepo_getValue_(row, 'case_id') || '').trim() === String(caseId).trim() &&
+      String(sheetsRepo_getValue_(row, 'form_key') || '').trim() === String(formKey).trim() &&
+      String(sheetsRepo_getValue_(row, 'submission_id') || '').trim() === String(submissionId).trim()
+    );
+  });
 }

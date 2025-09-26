@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { buildSignedQuery } from '@/lib/bas-sign';
 
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
 export async function GET(req: Request) {
   const endpoint = process.env.BAS_API_ENDPOINT;

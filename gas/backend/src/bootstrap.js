@@ -81,6 +81,38 @@ function bs_ensureSpreadsheet_(obj) {
   throw new Error('not_a_spreadsheet');
 }
 
+function bs_driveListFilesV3_(options) {
+  if (!Drive || !Drive.Files || typeof Drive.Files.list !== 'function') {
+    throw new Error('Drive.Files.list unavailable');
+  }
+  var base = {
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    fields: 'files(id,name,parents)',
+    corpora: 'allDrives',
+  };
+  var payload = Object.assign({}, base, options || {});
+  if ('driveId' in payload) delete payload.driveId;
+  if (!payload.pageSize && !payload.pageToken) payload.pageSize = 10;
+  var res = Drive.Files.list(payload);
+  return (res && res.files) || [];
+}
+
+function bs_driveCreateFolderV3_(resource) {
+  if (
+    typeof Drive === 'undefined' ||
+    !Drive ||
+    !Drive.Files ||
+    typeof Drive.Files.create !== 'function'
+  ) {
+    throw new Error('Drive.Files.create unavailable');
+  }
+  var meta = Object.assign({}, resource || {});
+  if (!meta.mimeType) meta.mimeType = 'application/vnd.google-apps.folder';
+  var params = { supportsAllDrives: true };
+  return Drive.Files.create(meta, null, params);
+}
+
 function bs_getSheet_(name) {
   const ss = bs_ensureSpreadsheet_(bs_openSpreadsheet_(BS_MASTER_SPREADSHEET_ID)); // Spreadsheet
   let sh = ss.getSheetByName(name); // Sheet
@@ -88,9 +120,43 @@ function bs_getSheet_(name) {
   return sh;
 }
 
+function bs_headerAliases_(raw) {
+  const value = String(raw == null ? '' : raw).trim();
+  if (!value) return [];
+  const normalizedSpace = value.replace(/[\s\u3000]+/g, ' ').trim();
+  const lower = normalizedSpace.toLowerCase();
+  const snake = lower
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  const camel = snake.replace(/_([a-z0-9])/g, function (_, c) {
+    return c.toUpperCase();
+  });
+  const pascal = camel ? camel.charAt(0).toUpperCase() + camel.slice(1) : '';
+  const flat = snake.replace(/_/g, '');
+  const aliases = new Set([
+    value,
+    normalizedSpace,
+    lower,
+    snake,
+    camel,
+    pascal,
+    flat,
+    flat.toLowerCase(),
+  ]);
+  return Array.from(aliases).filter(function (k) {
+    return !!k;
+  });
+}
+
 function bs_toIndexMap_(headers) {
   const m = {};
-  headers.forEach((h, i) => (m[h] = i));
+  (headers || []).forEach(function (h, i) {
+    const aliases = bs_headerAliases_(h);
+    aliases.forEach(function (key) {
+      if (!(key in m)) m[key] = i;
+    });
+  });
   return m;
 }
 
@@ -115,42 +181,73 @@ function bs_upsertContact_(payload) {
   const sh = bs_getSheet_(SHEET_CONTACTS);
   if (sh.getLastRow() < 1) {
     sh.getRange(1, 1, 1, 7).setValues([
-      ['userKey', 'lineId', 'displayName', 'email', 'activeCaseId', 'updatedAt', 'intakeAt'],
+      ['user_key', 'line_id', 'display_name', 'email', 'active_case_id', 'updated_at', 'intake_at'],
     ]);
   }
   let headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
   const idx = bs_toIndexMap_(headers);
-
-  const need = [
-    'userKey',
-    'lineId',
-    'displayName',
+  const required = [
+    'user_key',
+    'line_id',
+    'display_name',
     'email',
-    'activeCaseId',
-    'updatedAt',
-    'intakeAt',
+    'active_case_id',
+    'updated_at',
+    'intake_at',
   ];
   let changed = false;
-  need.forEach((col) => {
-    if (!(col in idx)) {
-      headers.push(col);
-      idx[col] = headers.length - 1;
+  required.forEach(function (key) {
+    if (!(key in idx)) {
+      headers.push(key);
+      idx[key] = headers.length - 1;
       changed = true;
     }
   });
-  if (changed) sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+  if (changed) {
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+  }
 
-  const { userKey, lineId, displayName, email } = payload;
-  if (!userKey) throw new Error('userKey required');
-  if (!lineId) throw new Error('lineId required');
+  // 互換用 alias を再設定
+  idx['userKey'] = idx['user_key'];
+  idx['lineId'] = idx['line_id'];
+  idx['displayName'] = idx['display_name'];
+  idx['activeCaseId'] = idx['active_case_id'];
+  idx['updatedAt'] = idx['updated_at'];
+  if (typeof idx['intake_at'] === 'number') idx['intakeAt'] = idx['intake_at'];
+
+  const alias = function (key, fallbacks) {
+    const keys = [key].concat(fallbacks || []);
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (typeof idx[k] === 'number') return idx[k];
+    }
+    return -1;
+  };
+
+  const user_key = payload.user_key ?? payload.userKey;
+  const line_id = payload.line_id ?? payload.lineId;
+  const display_name = payload.display_name ?? payload.displayName ?? '';
+  const email = payload.email ?? '';
+  if (!user_key) throw new Error('user_key required');
+  if (!line_id) throw new Error('line_id required');
+
+  const colUserKey = alias('user_key', ['userKey']);
+  const colLineId = alias('line_id', ['lineId']);
+  const colDisplayName = alias('display_name', ['displayName']);
+  const colEmail = alias('email', []);
+  const colActiveCaseId = alias('active_case_id', ['activeCaseId']);
+  const colUpdatedAt = alias('updated_at', ['updatedAt']);
+  const colIntakeAt = alias('intake_at', ['intakeAt']);
 
   const rowCount = sh.getLastRow() - 1;
   const rows = rowCount > 0 ? sh.getRange(2, 1, rowCount, headers.length).getValues() : [];
   let found = -1;
-  for (let i = 0; i < rows.length; i++) {
-    if (rows[i][idx['userKey']] === userKey) {
-      found = i;
-      break;
+  if (colUserKey >= 0) {
+    for (let i = 0; i < rows.length; i++) {
+      if (String(rows[i][colUserKey]) === String(user_key)) {
+        found = i;
+        break;
+      }
     }
   }
 
@@ -158,21 +255,21 @@ function bs_upsertContact_(payload) {
   if (found >= 0) {
     const row = 2 + found;
     const current = sh.getRange(row, 1, 1, headers.length).getValues()[0];
-    current[idx['lineId']] = lineId;
-    if (displayName != null) current[idx['displayName']] = displayName;
-    if (email != null) current[idx['email']] = email;
-    current[idx['updatedAt']] = now;
+    if (colLineId >= 0) current[colLineId] = line_id;
+    if (colDisplayName >= 0 && display_name != null) current[colDisplayName] = display_name;
+    if (colEmail >= 0 && email != null) current[colEmail] = email;
+    if (colUpdatedAt >= 0) current[colUpdatedAt] = now;
     sh.getRange(row, 1, 1, headers.length).setValues([current]);
     return { row, headers, idx };
   } else {
     const values = new Array(headers.length).fill('');
-    values[idx['userKey']] = userKey;
-    values[idx['lineId']] = lineId;
-    values[idx['displayName']] = displayName || '';
-    values[idx['email']] = email || '';
-    values[idx['activeCaseId']] = '';
-    values[idx['updatedAt']] = now;
-    if ('intakeAt' in idx) values[idx['intakeAt']] = '';
+    if (colUserKey >= 0) values[colUserKey] = user_key;
+    if (colLineId >= 0) values[colLineId] = line_id;
+    if (colDisplayName >= 0) values[colDisplayName] = display_name || '';
+    if (colEmail >= 0) values[colEmail] = email || '';
+    if (colActiveCaseId >= 0) values[colActiveCaseId] = '';
+    if (colUpdatedAt >= 0) values[colUpdatedAt] = now;
+    if (colIntakeAt >= 0) values[colIntakeAt] = '';
     sh.appendRow(values);
     return { row: sh.getLastRow(), headers, idx };
   }
@@ -183,13 +280,23 @@ function bs_setContactIntakeAt_(lineId, when) {
   if (sh.getLastRow() < 1) return;
   const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
   const idx = bs_toIndexMap_(headers);
-  if (!('intakeAt' in idx)) return; // 列がまだ無い場合は黙って無視
+  const alias = function (key, fallbacks) {
+    const keys = [key].concat(fallbacks || []);
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (typeof idx[k] === 'number') return idx[k];
+    }
+    return -1;
+  };
+  const intakeIdx = alias('intake_at', ['intakeAt']);
+  const lineIdx = alias('line_id', ['lineId']);
+  if (intakeIdx < 0 || lineIdx < 0) return;
   const rowCount = sh.getLastRow() - 1;
   if (rowCount < 1) return;
   const rows = sh.getRange(2, 1, rowCount, headers.length).getValues();
   for (let i = 0; i < rows.length; i++) {
-    if (String(rows[i][idx['lineId']]) === String(lineId)) {
-      sh.getRange(i + 2, idx['intakeAt'] + 1).setValue(when || new Date().toISOString());
+    if (String(rows[i][lineIdx]) === String(lineId)) {
+      sh.getRange(i + 2, intakeIdx + 1).setValue(when || new Date().toISOString());
       return;
     }
   }
@@ -200,15 +307,27 @@ function bs_setCaseStatus_(caseId, status) {
   if (sh.getLastRow() < 1) return;
   const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
   const idx = bs_toIndexMap_(headers);
+  const alias = function (key, fallbacks) {
+    const keys = [key].concat(fallbacks || []);
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (typeof idx[k] === 'number') return idx[k];
+    }
+    return -1;
+  };
+  const caseIdx = alias('case_id', ['caseId']);
+  const statusIdx = alias('status', []);
+  const lastIdx = alias('last_activity', ['lastActivity']);
+  if (caseIdx < 0 || statusIdx < 0) return;
   const rowCount = sh.getLastRow() - 1;
   if (rowCount < 1) return;
   const rows = sh.getRange(2, 1, rowCount, headers.length).getValues();
   for (let i = 0; i < rows.length; i++) {
-    if (String(rows[i][idx['caseId']]) === String(caseId)) {
-      sh.getRange(i + 2, idx['status'] + 1).setValue(status);
-      sh.getRange(i + 2, idx['lastActivity'] ? idx['lastActivity'] + 1 : 5).setValue(
-        new Date().toISOString()
-      );
+    if (String(rows[i][caseIdx]) === String(caseId)) {
+      sh.getRange(i + 2, statusIdx + 1).setValue(status);
+      if (lastIdx >= 0) {
+        sh.getRange(i + 2, lastIdx + 1).setValue(new Date().toISOString());
+      }
       return;
     }
   }
@@ -222,30 +341,65 @@ function bs_issueCaseId_(userKey, lineId) {
     const sh = bs_getSheet_(SHEET_CASES);
     if (sh.getLastRow() < 1) {
       sh.getRange(1, 1, 1, 6).setValues([
-        ['caseId', 'userKey', 'lineId', 'status', 'folderId', 'createdAt'],
+        ['case_id', 'user_key', 'line_id', 'status', 'folder_id', 'created_at'],
       ]);
     }
-    const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+    let headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
     const idx = bs_toIndexMap_(headers);
+    const required = ['case_id', 'user_key', 'line_id', 'status', 'folder_id', 'created_at'];
+    let changed = false;
+    required.forEach(function (key) {
+      if (!(key in idx)) {
+        headers.push(key);
+        idx[key] = headers.length - 1;
+        changed = true;
+      }
+    });
+    if (changed) {
+      sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+    }
+
+    idx['caseId'] = idx['case_id'];
+    idx['userKey'] = idx['user_key'];
+    idx['lineId'] = idx['line_id'];
+    idx['folderId'] = idx['folder_id'];
+    idx['createdAt'] = idx['created_at'];
+
+    const alias = function (key, fallbacks) {
+      const keys = [key].concat(fallbacks || []);
+      for (var i = 0; i < keys.length; i++) {
+        var k = keys[i];
+        if (typeof idx[k] === 'number') return idx[k];
+      }
+      return -1;
+    };
+
+    const colCaseId = alias('case_id', ['caseId']);
+    const colUserKey = alias('user_key', ['userKey']);
+    const colLineId = alias('line_id', ['lineId']);
+    const colStatus = alias('status', []);
+    const colFolderId = alias('folder_id', ['folderId']);
+    const colCreatedAt = alias('created_at', ['createdAt']);
+
     const rowCount = sh.getLastRow() - 1;
     const rows = rowCount > 0 ? sh.getRange(2, 1, rowCount, headers.length).getValues() : [];
-
     let maxNum = 0;
-    const cidIdx = idx['caseId'];
-    for (let i = 0; i < rows.length; i++) {
-      const n = parseInt(String(rows[i][cidIdx] || ''), 10);
-      if (Number.isFinite(n)) maxNum = Math.max(maxNum, n);
+    if (colCaseId >= 0) {
+      for (let i = 0; i < rows.length; i++) {
+        const n = parseInt(String(rows[i][colCaseId] || ''), 10);
+        if (Number.isFinite(n)) maxNum = Math.max(maxNum, n);
+      }
     }
     const next = String(maxNum + 1).padStart(4, '0');
     const now = new Date().toISOString();
 
     const values = new Array(headers.length).fill('');
-    values[idx['caseId']] = next;
-    values[idx['userKey']] = userKey;
-    values[idx['lineId']] = lineId;
-    values[idx['status']] = 'draft';
-    values[idx['folderId']] = '';
-    values[idx['createdAt']] = now;
+    if (colCaseId >= 0) values[colCaseId] = next;
+    if (colUserKey >= 0) values[colUserKey] = userKey;
+    if (colLineId >= 0) values[colLineId] = lineId;
+    if (colStatus >= 0) values[colStatus] = 'draft';
+    if (colFolderId >= 0) values[colFolderId] = '';
+    if (colCreatedAt >= 0) values[colCreatedAt] = now;
     sh.appendRow(values);
 
     return { caseId: next, row: sh.getLastRow(), headers, idx };
@@ -262,54 +416,14 @@ function bs_ensureCaseFolder_(userKey, caseId) {
   const normalizedCaseId = bs_normCaseId_(caseId);
   if (!normalizedCaseId) throw new Error('invalid_case_id');
   const title = bs_caseFolderName_(userKey, normalizedCaseId);
-  const escapedTitle = title.replace(/'/g, "\\'");
-  const q = [
-    `'${rootId}' in parents`,
-    "mimeType = 'application/vnd.google-apps.folder'",
-    `title = '${escapedTitle}'`,
-    'trashed = false',
-  ].join(' and ');
 
-  try {
-    const res = Drive.Files.list({
-      q,
-      maxResults: 1,
-      fields: 'items(id,title)',
-      corpora: 'allDrives',
-      includeTeamDriveItems: true,
-      supportsTeamDrives: true,
-    });
-    if (res.items && res.items.length > 0) {
-      return res.items[0].id;
-    }
-  } catch (err) {
-    try {
-      Logger.log('[bs_ensureCaseFolder_] list error: %s', (err && err.stack) || err);
-    } catch (_) {}
-  }
-
-  try {
-    const created = Drive.Files.insert(
-      {
-        title,
-        mimeType: 'application/vnd.google-apps.folder',
-        parents: [{ id: rootId }],
-      },
-      null,
-      { supportsTeamDrives: true }
-    );
-    if (created && created.id) return created.id;
-  } catch (err) {
-    try {
-      Logger.log('[bs_ensureCaseFolder_] insert error: %s', (err && err.stack) || err);
-    } catch (_) {}
-  }
-
+  // DriveApp のみで検索→作成（v2/v3 差異の影響を避ける）
   const root = DriveApp.getFolderById(rootId);
-  const fallback = root.getFoldersByName(title);
-  if (fallback.hasNext()) return fallback.next().getId();
+  const it = root.getFoldersByName(title);
+  if (it.hasNext()) return it.next().getId();
   return root.createFolder(title).getId();
 }
+
 
 /**
  * cases シートからフォルダ ID を取得（フォルダ新規作成はしない）
@@ -321,21 +435,30 @@ function bs_resolveCaseFolderId_(userKey, caseId, lineId) {
   if (sh.getLastRow() < 2) return '';
   const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
   const idx = bs_toIndexMap_(headers);
-  if (!('folderId' in idx)) return '';
+  const alias = function (key, fallbacks) {
+    const keys = [key].concat(fallbacks || []);
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (typeof idx[k] === 'number') return idx[k];
+    }
+    return -1;
+  };
+  const colFolderId = alias('folder_id', ['folderId']);
+  const colCaseId = alias('case_id', ['caseId']);
+  const colUserKey = alias('user_key', ['userKey']);
+  const colLineId = alias('line_id', ['lineId']);
+  if (colFolderId < 0 || colCaseId < 0) return '';
   const rowCount = sh.getLastRow() - 1;
   const rows = sh.getRange(2, 1, rowCount, headers.length).getValues();
-  const hasUserKey = 'userKey' in idx;
-  const hasLineId = 'lineId' in idx;
   for (let i = 0; i < rows.length; i++) {
-    const rowCaseId = bs_normCaseId_(rows[i][idx['caseId']] || '');
+    const rowCaseId = bs_normCaseId_(rows[i][colCaseId] || '');
     if (rowCaseId !== normalizedCaseId) continue;
-    if (hasUserKey && userKey) {
-      if (String(rows[i][idx['userKey']] || '') !== String(userKey)) continue;
-    } else if (hasLineId && lineId) {
-      // userKey 未保存の場合は lineId で補完
-      if (String(rows[i][idx['lineId']] || '') !== String(lineId)) continue;
+    if (colUserKey >= 0 && userKey) {
+      if (String(rows[i][colUserKey] || '') !== String(userKey)) continue;
+    } else if (colLineId >= 0 && lineId) {
+      if (String(rows[i][colLineId] || '') !== String(lineId)) continue;
     }
-    const folderId = String(rows[i][idx['folderId']] || '').trim();
+    const folderId = String(rows[i][colFolderId] || '').trim();
     if (folderId) return folderId;
     return '';
   }
@@ -343,110 +466,106 @@ function bs_resolveCaseFolderId_(userKey, caseId, lineId) {
 }
 
 /**
- * intake JSON が案件フォルダに移動済みかを確認（Drive Files v2 使用）
+ * intake JSON が案件フォルダに存在するかを DriveApp で確認
  */
 function bs_isIntakeJsonReady_(caseFolderId) {
   if (!caseFolderId) return false;
-  try {
-    const q = [
-      `'${caseFolderId}' in parents`,
-      "mimeType = 'application/json'",
-      "title contains 'intake__'",
-      'trashed = false',
-    ].join(' and ');
-    const res = Drive.Files.list({
-      q,
-      maxResults: 1,
-      fields: 'items(id,title,parents/id)',
-      corpora: 'allDrives',
-      includeTeamDriveItems: true,
-      supportsTeamDrives: true,
-    });
-    return Array.isArray(res.items) && res.items.length > 0;
-  } catch (e) {
-    try {
-      Logger.log('[bs_isIntakeJsonReady_] error: %s', (e && e.stack) || e);
-    } catch (_) {}
-    return false;
+  const folder = DriveApp.getFolderById(caseFolderId);
+  const it = folder.getFiles();
+  while (it.hasNext()) {
+    const file = it.next();
+    const name = file.getName && file.getName();
+    if (name && /^intake__/i.test(name)) return true;
   }
+  return false;
 }
 
 function resolveCaseFolderId_(lineId, caseId) {
-  return bs_resolveCaseFolderId_('', caseId, lineId);
+  const direct = bs_resolveCaseFolderId_('', caseId, lineId);
+  if (direct) return direct;
+
+  const userKey = lineId ? drive_userKeyFromLineId_(lineId) : '';
+  if (userKey) {
+    const viaUser = bs_resolveCaseFolderId_(userKey, caseId, lineId);
+    if (viaUser) return viaUser;
+    try {
+      const ensuredId = bs_ensureCaseFolder_(userKey, caseId);
+      if (ensuredId) return ensuredId;
+    } catch (err) {
+      try {
+        Logger.log('[resolveCaseFolderId_] ensure error: %s', (err && err.stack) || err);
+      } catch (_) {}
+    }
+  }
+
+  return '';
 }
 
 function bs_collectIntakeFromStaging_(lineId, caseId) {
   const normalizedCaseId = bs_normCaseId_(caseId);
   if (!lineId || !normalizedCaseId) return;
+
+  let caseFolderId = resolveCaseFolderId_(lineId, normalizedCaseId);
+  if (!caseFolderId) return;
+
+  let caseFolder;
   try {
-    if (typeof moveStagingIntakeJsonToCase_ === 'function') {
-      moveStagingIntakeJsonToCase_(lineId, normalizedCaseId);
-      return;
-    }
-  } catch (e) {
+    caseFolder = DriveApp.getFolderById(caseFolderId);
+  } catch (err) {
     try {
-      Logger.log('[bs_collectIntakeFromStaging_] move helper error: %s', (e && e.stack) || e);
+      Logger.log('[bs_collectIntakeFromStaging_] case folder error: %s', (err && err.stack) || err);
     } catch (_) {}
+    return;
   }
 
   try {
-    const caseFolderId = resolveCaseFolderId_(lineId, normalizedCaseId);
-    if (!caseFolderId) return;
     const root = DriveApp.getFolderById(DRIVE_ROOT_ID);
-    const stagingIterator = root.getFoldersByName('_staging');
-    if (!stagingIterator.hasNext()) return;
-    const stagingRoot = stagingIterator.next();
-    const stack = [stagingRoot];
-    while (stack.length > 0) {
-      const folder = stack.pop();
-      const files = folder.getFiles();
+    ['_staging', '_email_staging'].forEach(function (name) {
+      const iter = root.getFoldersByName(name);
+      if (!iter.hasNext()) return;
+      moveAll(iter.next());
+    });
+  } catch (err) {
+    try {
+      Logger.log('[bs_collectIntakeFromStaging_] error: %s', (err && err.stack) || err);
+    } catch (_) {}
+  }
+
+  function moveAll(folder) {
+    const stack = [folder];
+    while (stack.length) {
+      const current = stack.pop();
+      const files = current.getFiles();
       while (files.hasNext()) {
         const file = files.next();
-        if (
-          file.getMimeType() === 'application/json' &&
-          /^intake__/i.test(file.getName())
-        ) {
-          try {
-            const parentIds = [];
-            const parents = file.getParents();
-            while (parents.hasNext()) parentIds.push(parents.next().getId());
-            const request = {
-              addParents: caseFolderId,
-              supportsAllDrives: true,
-              supportsTeamDrives: true,
-            };
-            if (parentIds.length > 0) {
-              request.removeParents = parentIds.join(',');
-            }
-            Drive.Files.update({}, file.getId(), null, request);
-          } catch (err) {
+        if (file.getMimeType && file.getMimeType() === 'application/json') {
+          const name = file.getName ? file.getName() : '';
+          if (/^intake__/i.test(name)) {
             try {
-              const caseFolder = DriveApp.getFolderById(caseFolderId);
               caseFolder.addFile(file);
-              const parentsFallback = file.getParents();
-              while (parentsFallback.hasNext()) {
-                const p = parentsFallback.next();
-                if (p.getId() !== caseFolderId) {
+              const parents = file.getParents();
+              while (parents.hasNext()) {
+                const parent = parents.next();
+                if (parent.getId && parent.getId() !== caseFolderId) {
                   try {
-                    p.removeFile(file);
+                    parent.removeFile(file);
                   } catch (_) {}
                 }
               }
-            } catch (inner) {
+            } catch (err) {
               try {
-                Logger.log('[bs_collectIntakeFromStaging_] fallback error: %s', (inner && inner.stack) || inner);
+                Logger.log(
+                  '[bs_collectIntakeFromStaging_] move error: %s',
+                  (err && err.stack) || err
+                );
               } catch (_) {}
             }
           }
         }
       }
-      const children = folder.getFolders();
+      const children = current.getFolders();
       while (children.hasNext()) stack.push(children.next());
     }
-  } catch (err) {
-    try {
-      Logger.log('[bs_collectIntakeFromStaging_] error: %s', (err && err.stack) || err);
-    } catch (_) {}
   }
 }
 
@@ -465,6 +584,11 @@ function handleStatus_(lineId, caseId, hasIntake, userKey) {
     } catch (_) {}
   }
   const caseFolderReady = Boolean(folderId);
+  if (!caseFolderReady) {
+    try {
+      Logger.log('[handleStatus_] no folderId yet, userKey=%s caseId=%s', userKey || '', normalizedCaseId);
+    } catch (_) {}
+  }
   let intakeReady = folderId ? bs_isIntakeJsonReady_(folderId) : false;
   if (!intakeReady) {
     bs_collectIntakeFromStaging_(lineId, normalizedCaseId);
@@ -537,6 +661,14 @@ function doPost(e) {
       ).setMimeType(ContentService.MimeType.JSON);
     }
 
+    if (action === 'markReopen') {
+      const contentType = (e && e.postData && e.postData.type) || '';
+      if (!contentType || contentType.toLowerCase().indexOf('application/json') === -1) {
+        return statusApi_jsonOut_({ ok: false, error: 'content_type_must_be_json' }, 415);
+      }
+      return statusApi_handleMarkReopenPost_(body || {});
+    }
+
     // 通常フロー: 署名チェック（返却点はここだけ）
     const SECRET = PropertiesService.getScriptProperties().getProperty('BOOTSTRAP_SECRET') || '';
     const base = lineId + '|' + ts;
@@ -571,7 +703,16 @@ function doPost(e) {
 
     // 新フロー: action でルーティング（デフォルトは副作用なし）
     ST = 'ensure_master';
-    const { contacts } = bs_ensureMaster_();
+    bs_ensureMaster_();
+
+    const aliasIdx = function (map, key, fallbacks) {
+      const keys = [key].concat(fallbacks || []);
+      for (var i = 0; i < keys.length; i++) {
+        var k = keys[i];
+        if (map && typeof map[k] === 'number') return map[k];
+      }
+      return -1;
+    };
 
     const userKey = String(
       (body || {}).userKey ?? (qs || {}).userKey ?? lineId.slice(0, 6).toLowerCase()
@@ -587,8 +728,10 @@ function doPost(e) {
       const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
       const idx = bs_toIndexMap_(headers);
       const rowVals = sh.getRange(up.row, 1, 1, headers.length).getValues()[0];
-      const intakeAt = 'intakeAt' in idx ? rowVals[idx['intakeAt']] : '';
-      const activeCaseIdRaw = 'activeCaseId' in idx ? rowVals[idx['activeCaseId']] : '';
+      const intakeIdx = aliasIdx(idx, 'intake_at', ['intakeAt']);
+      const activeIdx = aliasIdx(idx, 'active_case_id', ['activeCaseId']);
+      const intakeAt = intakeIdx >= 0 ? rowVals[intakeIdx] : '';
+      const activeCaseIdRaw = activeIdx >= 0 ? rowVals[activeIdx] : '';
       const activeCaseId = bs_normCaseId_(activeCaseIdRaw);
       return handleStatus_(lineId, activeCaseId, !!intakeAt, userKey);
     }
@@ -600,7 +743,8 @@ function doPost(e) {
       const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
       const idx = bs_toIndexMap_(headers);
       const rowVals = sh.getRange(up.row, 1, 1, headers.length).getValues()[0];
-      let activeCaseId = bs_normCaseId_(rowVals[idx['activeCaseId']] || '');
+      const activeIdx = aliasIdx(idx, 'active_case_id', ['activeCaseId']);
+      let activeCaseId = bs_normCaseId_(activeIdx >= 0 ? rowVals[activeIdx] || '' : '');
       if (!activeCaseId) {
         ST = 'issue_case_id';
         const issued = bs_issueCaseId_(userKey, lineId);
@@ -613,20 +757,26 @@ function doPost(e) {
       // cases シートの該当行に folderId を書く（最後に追加された or 探索）
       const h2 = shCases.getRange(1, 1, 1, shCases.getLastColumn()).getValues()[0];
       const i2 = bs_toIndexMap_(h2);
+      const caseIdx = aliasIdx(i2, 'case_id', ['caseId']);
+      const folderIdx = aliasIdx(i2, 'folder_id', ['folderId']);
+      const statusIdx = aliasIdx(i2, 'status', []);
       const rc = shCases.getLastRow() - 1;
-      if (rc > 0) {
+      if (rc > 0 && caseIdx >= 0) {
         const rows = shCases.getRange(2, 1, rc, h2.length).getValues();
         for (let i = rows.length - 1; i >= 0; i--) {
-          if (bs_normCaseId_(rows[i][i2['caseId']]) === activeCaseId) {
-            shCases.getRange(i + 2, i2['folderId'] + 1).setValue(folderId);
-            shCases.getRange(i + 2, i2['status'] + 1).setValue('intake');
+          if (bs_normCaseId_(rows[i][caseIdx]) === activeCaseId) {
+            if (folderIdx >= 0) shCases.getRange(i + 2, folderIdx + 1).setValue(folderId);
+            if (statusIdx >= 0) shCases.getRange(i + 2, statusIdx + 1).setValue('intake');
             break;
           }
         }
       }
       ST = 'writeback_contacts';
       const shContacts = bs_getSheet_(SHEET_CONTACTS);
-      shContacts.getRange(up.row, up.idx['activeCaseId'] + 1).setValue(activeCaseId);
+      const contactActiveIdx = aliasIdx(up.idx, 'active_case_id', ['activeCaseId']);
+      if (contactActiveIdx >= 0) {
+        shContacts.getRange(up.row, contactActiveIdx + 1).setValue(activeCaseId);
+      }
       bs_setContactIntakeAt_(lineId, new Date().toISOString());
       // _staging にある intake JSON を案件直下へ移送（存在すれば）
       bs_collectIntakeFromStaging_(lineId, activeCaseId);
@@ -648,12 +798,14 @@ function doPost(e) {
     const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
     const idx = bs_toIndexMap_(headers);
     const rowVals = sh.getRange(up.row, 1, 1, headers.length).getValues()[0];
+    const intakeIdx = aliasIdx(idx, 'intake_at', ['intakeAt']);
+    const activeIdx = aliasIdx(idx, 'active_case_id', ['activeCaseId']);
     return bs_jsonResponse_(
       {
         ok: true,
         VER,
-        hasIntake: !!(idx['intakeAt'] != null && rowVals[idx['intakeAt']]),
-        activeCaseId: rowVals[idx['activeCaseId']] || null,
+        hasIntake: !!(intakeIdx >= 0 && rowVals[intakeIdx]),
+        activeCaseId: activeIdx >= 0 ? rowVals[activeIdx] || null : null,
       },
       200
     );

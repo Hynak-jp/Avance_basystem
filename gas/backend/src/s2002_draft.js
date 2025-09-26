@@ -55,8 +55,8 @@ function run_ProcessInbox_S2002() {
         // 3) ステータス更新
         updateCasesRow_(parsed.meta.case_id, {
           status: 'draft',
-          lastActivity: new Date(),
-          lastDraftUrl: draft.draftUrl,
+          last_activity: new Date(),
+          last_draft_url: draft.draftUrl,
         });
 
         // ラベル付替え
@@ -96,8 +96,8 @@ function run_GenerateS2002DraftByCaseId(caseId) {
   const draft = generateS2002Draft_(caseInfo, parsed);
   updateCasesRow_(caseId, {
     status: 'draft',
-    lastActivity: new Date(),
-    lastDraftUrl: draft.draftUrl,
+    last_activity: new Date(),
+    last_draft_url: draft.draftUrl,
   });
   try {
     Logger.log('[S2002] draft created: %s', draft.draftUrl);
@@ -118,15 +118,21 @@ function run_GenerateS2002DraftByFolder(caseFolderId) {
   const sh = ss.getSheetByName('cases');
   const vals = sh.getDataRange().getValues();
   const header = vals[0];
-  const idxFolder = header.indexOf('folderId');
-  const idxCaseId = header.indexOf('caseId');
+  const idxMap = bs_toIndexMap_(header);
+  const idxFolder = idxMap.folder_id;
+  const idxCaseId = idxMap.case_id;
+  const idxCaseKey = idxMap.case_key;
+  const idxLineId = idxMap.line_id;
+  if (!(idxFolder >= 0 && idxCaseId >= 0)) {
+    throw new Error('cases sheet is missing folder_id/case_id columns');
+  }
   let caseInfo = null;
   for (let i = 1; i < vals.length; i++) {
     if (String(vals[i][idxFolder]) === String(caseFolderId)) {
       caseInfo = {
         caseId: vals[i][idxCaseId],
-        caseKey: vals[i][header.indexOf('caseKey')],
-        lineId: vals[i][header.indexOf('lineId')],
+        caseKey: idxCaseKey >= 0 ? vals[i][idxCaseKey] : '',
+        lineId: idxLineId >= 0 ? vals[i][idxLineId] : '',
         folderId: caseFolderId,
         rowIndex: i + 1,
       };
@@ -138,8 +144,8 @@ function run_GenerateS2002DraftByFolder(caseFolderId) {
   const draft = generateS2002Draft_(caseInfo, parsed);
   updateCasesRow_(caseInfo.caseId, {
     status: 'draft',
-    lastActivity: new Date(),
-    lastDraftUrl: draft.draftUrl,
+    last_activity: new Date(),
+    last_draft_url: draft.draftUrl,
   });
   return draft;
 }
@@ -268,7 +274,7 @@ function debug_InspectCaseFolder(caseId) {
  * 使い方: debug_SetCaseFolderId('0001', 'xxxxxxxxxxxxxxxxxxxx')
  */
 function debug_SetCaseFolderId(caseId, folderId) {
-  updateCasesRow_(caseId, { folderId: String(folderId || '').trim() });
+  updateCasesRow_(caseId, { folder_id: String(folderId || '').trim() });
   const info = resolveCaseByCaseId_(caseId);
   Logger.log('[S2002] folderId updated: caseId=%s folderId=%s', caseId, info && info.folderId);
 }
@@ -681,12 +687,16 @@ function resolveCaseByCaseId_(caseId) {
   const sh = ss.getSheetByName('cases');
   const vals = sh.getDataRange().getValues();
   const header = vals[0];
+  const idxMap = bs_toIndexMap_(header);
   const idx = {
-    caseId: header.indexOf('caseId'),
-    lineId: header.indexOf('lineId'),
-    caseKey: header.indexOf('caseKey'),
-    folderId: header.indexOf('folderId'),
+    caseId: idxMap.case_id,
+    lineId: idxMap.line_id,
+    caseKey: idxMap.case_key,
+    folderId: idxMap.folder_id,
   };
+  if (!(idx.caseId >= 0)) {
+    throw new Error('cases sheet does not contain case_id column');
+  }
   const want = normalizeCaseIdString_(caseId);
   for (let i = 1; i < vals.length; i++) {
     const row = vals[i];
@@ -694,9 +704,9 @@ function resolveCaseByCaseId_(caseId) {
     if (rowCase && rowCase === want) {
       return {
         caseId: rowCase,
-        lineId: row[idx.lineId],
-        caseKey: row[idx.caseKey],
-        folderId: row[idx.folderId],
+        lineId: idx.lineId >= 0 ? row[idx.lineId] : '',
+        caseKey: idx.caseKey >= 0 ? row[idx.caseKey] : '',
+        folderId: idx.folderId >= 0 ? row[idx.folderId] : '',
         rowIndex: i + 1,
       };
     }
@@ -709,23 +719,38 @@ function updateCasesRow_(caseId, patch) {
   const sh = ss.getSheetByName('cases');
   const vals = sh.getDataRange().getValues();
   const header = vals[0];
-  const idxCase = header.indexOf('caseId');
+  const idxMap = bs_toIndexMap_(header);
+  const idxCase = idxMap.case_id;
+  if (!(idxCase >= 0)) return;
   const want = normalizeCaseIdString_(caseId);
   const rowIdx = vals.findIndex((r, i) => i > 0 && normalizeCaseIdString_(r[idxCase]) === want);
   if (rowIdx < 1) return;
   const r = rowIdx + 1;
   Object.keys(patch).forEach((k) => {
-    const c = header.indexOf(k);
+    let c = idxMap[k];
+    if (!(c >= 0) && typeof bs_headerAliases_ === 'function') {
+      const aliases = bs_headerAliases_(k);
+      for (let i = 0; i < aliases.length; i++) {
+        const candidate = idxMap[aliases[i]];
+        if (candidate >= 0) {
+          c = candidate;
+          break;
+        }
+      }
+    }
     if (c >= 0) sh.getRange(r, c + 1).setValue(patch[k]);
   });
 }
 
 function saveSubmissionJson_(caseFolderId, parsed) {
   const parent = DriveApp.getFolderById(caseFolderId);
-  const fname = `${parsed.meta.form_key}__${parsed.meta.submission_id || Date.now()}.json`;
+  const sid =
+    parsed && parsed.meta && parsed.meta.submission_id
+      ? String(parsed.meta.submission_id)
+      : String(Date.now());
+  const fname = `${parsed.meta.form_key}__${sid}.json`;
   const blob = Utilities.newBlob(JSON.stringify(parsed, null, 2), 'application/json', fname);
-  parent.createFile(blob); // 仕様: ケース直下に保存
-  return `${caseFolderId}/${fname}`;
+  return parent.createFile(blob); // 仕様: ケース直下に保存
 }
 
 function getOrCreateSubfolder_(parent, name) {
@@ -757,11 +782,11 @@ function ensureCaseFolderId_(caseInfo) {
             normalizeCaseIdString_(caseInfo.caseId || '');
         const better = findBestCaseFolderUnderRoot_(nameGuess, f.getId());
         if (better && better.id !== f.getId() && better.score > currentScore.score) {
-          updateCasesRow_(caseInfo.caseId, { folderId: better.id, caseKey: nameGuess });
+          updateCasesRow_(caseInfo.caseId, { folder_id: better.id, case_key: nameGuess });
           return better.id;
         }
         // 現行のIDで続行
-        if (norm !== caseInfo.folderId) updateCasesRow_(caseInfo.caseId, { folderId: norm });
+        if (norm !== caseInfo.folderId) updateCasesRow_(caseInfo.caseId, { folder_id: norm });
         return norm;
       }
     } catch (_) {
@@ -791,7 +816,7 @@ function ensureCaseFolderId_(caseInfo) {
   const best = findBestCaseFolderUnderRoot_(name);
   const id = best ? best.id : root.createFolder(name).getId();
   // folderId は必ず書き戻し。caseKey 列が存在すれば caseKey も書き戻される（無ければスキップ）。
-  updateCasesRow_(caseInfo.caseId, { folderId: id, caseKey: name });
+  updateCasesRow_(caseInfo.caseId, { folder_id: id, case_key: name });
   return id;
 }
 

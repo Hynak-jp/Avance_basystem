@@ -1,10 +1,11 @@
 /********** 設定 **********/
 // Script Properties を最優先に使用（DRIVE_ROOT_FOLDER_ID → ROOT_FOLDER_ID の順）
 const PROPS = PropertiesService.getScriptProperties();
-const ROOT_FOLDER_ID =
-  PROPS.getProperty('DRIVE_ROOT_FOLDER_ID') ||
-  PROPS.getProperty('ROOT_FOLDER_ID') ||
-  '15QnwkhoXUkh8gVg56R3cSX-fg--PqYdu'; // 親フォルダID
+const ROOT_FOLDER_ID = (function () {
+  const id = PROPS.getProperty('DRIVE_ROOT_FOLDER_ID') || PROPS.getProperty('ROOT_FOLDER_ID');
+  if (!id) throw new Error('DRIVE_ROOT_FOLDER_ID/ROOT_FOLDER_ID is not configured');
+  return id;
+})();
 const SHEET_ID = ''; // 既存の台帳シートを使うならIDを入れる。空なら後で自動生成可能
 const LABEL_TO_PROCESS = 'FormAttach/ToProcess';
 const LABEL_PROCESSED = 'FormAttach/Processed';
@@ -389,11 +390,8 @@ function caseKey_(lineId, caseId) {
 }
 /** <userKey-caseId>/ を BAS ルート直下に作成、標準サブフォルダも用意 */
 function ensureCaseFolder_(lineId, caseId) {
-  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
   const key = caseKey_(lineId, caseId);
-  const it = root.getFoldersByName(key);
-  const folder = it.hasNext() ? it.next() : root.createFolder(key);
-  // サブフォルダ（必要に応じて増やす）
+  const folder = drive_getOrCreateCaseFolderByKey_(key);
   getOrCreateFolder(folder, 'attachments');
   getOrCreateFolder(folder, 'staff_inputs');
   getOrCreateFolder(folder, 'drafts');
@@ -1536,8 +1534,20 @@ function ocr_processSaved_(saved, meta) {
 
 /********** エントリ **********/
 function cron_1min() {
-  ensureLabels();
-  processLabel(LABEL_TO_PROCESS);
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10 * 1000)) return;
+  try {
+    if (typeof run_ProcessInbox_AllForms === 'function') {
+      run_ProcessInbox_AllForms();
+    } else {
+      ensureLabels();
+      processLabel(LABEL_TO_PROCESS);
+    }
+  } catch (e) {
+    console.error('cron_1min failed:', e);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function pickDisplayName(fields) {
@@ -1707,7 +1717,7 @@ function casesAppend_(lineId, caseId) {
   const ss = openOrCreateMaster_();
   const sh = ss.getSheetByName('cases') || ss.insertSheet('cases');
   if (sh.getLastRow() === 0)
-    sh.appendRow(['lineId', 'caseId', 'createdAt', 'status', 'lastActivity']);
+    sh.appendRow(['line_id', 'case_id', 'created_at', 'status', 'last_activity']);
   const now = new Date();
   sh.appendRow([lineId, caseId, now, 'draft', now]);
 }

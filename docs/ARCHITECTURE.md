@@ -17,6 +17,8 @@
     - ログイン直後は `api/status` で受付済みか確認し、未済なら「受付フォームのみ」を表示
     - 受付フォームは `lineId|ts` 署名で遷移（caseId なし）
     - 受付完了時に `api/intake/complete` → GAS `action:intake_complete` を呼び出し、初めて採番
+      - **受付フォーム（`form_key: intake`）から届くメール META に `case_id` が記載されることはない。**
+      - GAS 側が採番した `case_id` と `user_key` を JSON（`intake__*.json`）へ書き戻し、案件フォルダへ保存する。
     - 以降のフォームは `lineId|caseId|ts` 署名で遷移
 
 - **gas (Google Apps Script, WebApp)**

@@ -41,11 +41,57 @@ function run_ProcessInbox_S2010() {
         const formKey = String(parsed.meta?.form_key || '').trim();
         if (!/^s2010_/.test(formKey)) return; // 関係ない通知は無視
 
-        const caseInfo = resolveCaseByCaseId_(parsed.meta.case_id);
-        if (!caseInfo) throw new Error(`Unknown case_id: ${parsed.meta.case_id}`);
-        caseInfo.folderId = ensureCaseFolderId_(caseInfo);
+        const caseInfo = resolveCaseByCaseId_(parsed.meta.case_id) || {};
+        const fallbackInfo = {
+          caseId: caseInfo.caseId || parsed.meta?.case_id,
+          case_id: caseInfo.caseId || parsed.meta?.case_id,
+          caseKey: caseInfo.caseKey,
+          case_key: caseInfo.caseKey,
+          userKey:
+            (caseInfo.caseKey && String(caseInfo.caseKey).indexOf('-') >= 0
+              ? String(caseInfo.caseKey).split('-')[0]
+              : caseInfo.userKey) || '',
+          user_key:
+            (caseInfo.caseKey && String(caseInfo.caseKey).indexOf('-') >= 0
+              ? String(caseInfo.caseKey).split('-')[0]
+              : caseInfo.userKey) || '',
+          lineId: caseInfo.lineId || parsed.meta?.line_id || parsed.meta?.lineId || '',
+          line_id: caseInfo.lineId || parsed.meta?.line_id || parsed.meta?.lineId || '',
+        };
+        const resolvedCaseKey = drive_resolveCaseKeyFromMeta_(parsed.meta || {}, fallbackInfo);
+        const caseFolder = drive_getOrCreateCaseFolderByKey_(resolvedCaseKey);
+        const caseFolderId = caseFolder.getId();
+        caseInfo.folderId = caseFolderId;
+        caseInfo.caseKey = resolvedCaseKey;
+        caseInfo.userKey = resolvedCaseKey.split('-')[0];
+        caseInfo.user_key = caseInfo.userKey;
+        if (!caseInfo.lineId && fallbackInfo.lineId) caseInfo.lineId = fallbackInfo.lineId;
 
-        saveSubmissionJson_(caseInfo.folderId, parsed);
+        const savedFile = saveSubmissionJson_(caseFolderId, parsed);
+        try {
+          drive_placeFileIntoCase_(savedFile, parsed.meta || {}, {
+            caseId: fallbackInfo.caseId,
+            case_id: fallbackInfo.case_id,
+            caseKey: resolvedCaseKey,
+            case_key: resolvedCaseKey,
+            userKey: caseInfo.userKey,
+            user_key: caseInfo.userKey,
+            lineId: caseInfo.lineId,
+            line_id: caseInfo.lineId,
+          });
+        } catch (err) {
+          Logger.log('[S2010] placeFile error: %s', (err && err.stack) || err);
+        }
+
+        if (typeof updateCasesRow_ === 'function') {
+          const patch = {
+            case_key: resolvedCaseKey,
+            folder_id: caseFolderId,
+            user_key: caseInfo.userKey,
+            last_activity: new Date(),
+          };
+          updateCasesRow_(parsed.meta.case_id, patch);
+        }
 
         if (haveAllPartsS2010_(caseInfo.folderId, S2010_PART_PREFIXES)) {
           run_GenerateS2010MergedJsonByCaseId(caseInfo.caseId);
@@ -74,8 +120,8 @@ function run_GenerateS2010DraftByCaseId(caseId) {
   const draft = generateS2010Draft_(info, parsed);
   updateCasesRow_(info.caseId || caseId, {
     status: 'draft',
-    lastActivity: new Date(),
-    lastDraftUrl: draft.draftUrl,
+    last_activity: new Date(),
+    last_draft_url: draft.draftUrl,
   });
   try {
     Logger.log('[S2010] draft created: %s', draft.draftUrl);
@@ -138,8 +184,8 @@ function run_GenerateS2010DraftMergedByCaseId(caseId) {
   // 6) ステータス更新
   updateCasesRow_(info.caseId || caseId, {
     status: 'draft',
-    lastActivity: new Date(),
-    lastDraftUrl: draft.draftUrl,
+    last_activity: new Date(),
+    last_draft_url: draft.draftUrl,
   });
 
   try { Logger.log('[S2010] merged draft created: %s', draft.draftUrl); } catch (_){ }

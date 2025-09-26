@@ -56,7 +56,7 @@ const FORM_INTAKE_REGISTRY = {
       if (typeof generateS2002Draft_ === 'function') {
         const draft = generateS2002Draft_(caseInfo, parsed);
         const patch = {};
-        if (draft && draft.draftUrl) patch.lastDraftUrl = draft.draftUrl;
+        if (draft && draft.draftUrl) patch.last_draft_url = draft.draftUrl;
         return patch;
       }
       return {};
@@ -84,6 +84,88 @@ const FORM_INTAKE_QUEUE_LABELS = Object.freeze(
 );
 
 const FORM_INTAKE_LABEL_CACHE = {};
+
+function formIntake_normalizeCaseId_(value) {
+  if (typeof bs_normCaseId_ === 'function') return bs_normCaseId_(value);
+  const digits = String(value || '').replace(/\D/g, '');
+  if (!digits) return '';
+  return digits.padStart(4, '0');
+}
+
+function formIntake_normalizeUserKey_(value) {
+  const raw = String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!raw) return '';
+  if (raw.length >= 6) return raw.slice(0, 6);
+  return (raw + 'xxxxxx').slice(0, 6);
+}
+
+function formIntake_generateUserKey_(meta) {
+  const sources = [
+    meta && meta.user_key,
+    meta && meta.userKey,
+    meta && meta.email,
+    meta && meta.Email,
+    meta && meta.mail,
+    meta && meta.submission_id,
+    meta && meta.submissionId,
+  ];
+  for (let i = 0; i < sources.length; i++) {
+    const normal = formIntake_normalizeUserKey_(sources[i]);
+    if (normal) return normal;
+  }
+  const seed =
+    typeof Utilities !== 'undefined' && typeof Utilities.getUuid === 'function'
+      ? Utilities.getUuid()
+      : Date.now().toString(36) + Math.random().toString(36).slice(2);
+  return formIntake_normalizeUserKey_(seed);
+}
+
+function formIntake_issueNewCase_(meta) {
+  if (typeof bs_issueCaseId_ !== 'function') {
+    throw new Error('case_id を採番できません (bs_issueCaseId_ 未定義)');
+  }
+  const userKeyHint = formIntake_normalizeUserKey_(meta && (meta.user_key || meta.userKey));
+  const userKey = userKeyHint || formIntake_generateUserKey_(meta);
+  const lineId = String((meta && (meta.line_id || meta.lineId)) || '').trim();
+  const issued = bs_issueCaseId_(userKey, lineId);
+  const caseId = formIntake_normalizeCaseId_(issued && issued.caseId);
+  if (!caseId) throw new Error('case_id の採番に失敗しました');
+  return { caseId, userKey, lineId };
+}
+
+function formIntake_prepareCaseInfo_(meta, def, parsed) {
+  const metaObj = meta || {};
+  if (parsed && !parsed.meta) parsed.meta = metaObj;
+  let caseId = formIntake_normalizeCaseId_(metaObj.case_id || metaObj.caseId);
+  let userKey = formIntake_normalizeUserKey_(metaObj.user_key || metaObj.userKey);
+  let lineId = String(metaObj.line_id || metaObj.lineId || '').trim();
+  if (!userKey && metaObj.email && typeof lookupUserKeyByEmail_ === 'function') {
+    userKey = formIntake_normalizeUserKey_(lookupUserKeyByEmail_(metaObj.email));
+  }
+  if (!lineId && typeof lookupLineIdByUserKey_ === 'function' && userKey) {
+    lineId = String(lookupLineIdByUserKey_(userKey) || '').trim();
+  }
+  if (!caseId) {
+    const issued = formIntake_issueNewCase_(metaObj);
+    caseId = issued.caseId;
+    userKey = issued.userKey || userKey;
+    lineId = issued.lineId || lineId;
+    metaObj.case_id = caseId;
+    metaObj.caseId = caseId;
+    if (userKey && !metaObj.user_key) metaObj.user_key = userKey;
+    if (userKey && !metaObj.userKey) metaObj.userKey = userKey;
+  }
+  const caseInfo = formIntake_resolveCase_(caseId, def);
+  caseInfo.caseId = caseInfo.caseId || caseId;
+  if (!caseInfo.userKey && userKey) caseInfo.userKey = userKey;
+  if (!caseInfo.lineId && lineId) caseInfo.lineId = lineId;
+  return {
+    caseInfo,
+    caseId,
+    userKey: caseInfo.userKey || userKey || '',
+    lineId: caseInfo.lineId || lineId || '',
+  };
+}
 
 function formIntake_labelOrCreate_(name) {
   if (!name) return null;
@@ -134,24 +216,160 @@ function run_ProcessInbox_AllForms() {
           return;
         }
 
-        const caseInfo = formIntake_resolveCase_(meta.case_id, def);
-        caseInfo.folderId = formIntake_ensureCaseFolder_(caseInfo, def);
+        const prepared = formIntake_prepareCaseInfo_(meta, def, parsed);
+        const caseInfo = prepared.caseInfo || {};
+        const caseId = prepared.caseId;
+        const case_id = caseId;
+        caseInfo.caseId = caseInfo.caseId || caseId;
+        if (!caseInfo.case_id) caseInfo.case_id = caseInfo.caseId;
 
-        if (formIntake_isDuplicateSubmission_(caseInfo.folderId, actualKey, meta.submission_id)) {
+        // intake（meta.case_id 無し）への採番結果を同じ参照に反映
+        if (!meta.case_id) meta.case_id = caseId;
+        if (!meta.caseId) meta.caseId = caseId;
+        if (!meta.submission_id) {
+          meta.submission_id =
+            meta.submissionId ||
+            (typeof Utilities !== 'undefined' && typeof Utilities.getUuid === 'function'
+              ? Utilities.getUuid()
+              : String(Date.now()));
+        }
+        if (!meta.submissionId) meta.submissionId = meta.submission_id;
+        parsed.meta = meta;
+
+        const fallbackInfo = {
+          caseId,
+          case_id,
+          caseKey: caseInfo.caseKey,
+          case_key: caseInfo.caseKey,
+          userKey: caseInfo.userKey || caseInfo.user_key || prepared.userKey || '',
+          user_key: caseInfo.userKey || caseInfo.user_key || prepared.userKey || '',
+          lineId: caseInfo.lineId || prepared.lineId || '',
+          line_id: caseInfo.lineId || prepared.lineId || '',
+        };
+
+        let resolvedCaseKey =
+          caseInfo.caseKey && String(caseInfo.caseKey) ? String(caseInfo.caseKey) : '';
+        if (!resolvedCaseKey && (caseInfo.userKey || prepared.userKey)) {
+          const uk = caseInfo.userKey || prepared.userKey;
+          resolvedCaseKey = `${uk}-${caseId}`;
+        }
+        if (!resolvedCaseKey) {
+          resolvedCaseKey = drive_resolveCaseKeyFromMeta_(
+            parsed?.meta || parsed?.META || {},
+            fallbackInfo
+          );
+        }
+        if (!resolvedCaseKey && fallbackInfo.userKey) {
+          resolvedCaseKey = `${fallbackInfo.userKey}-${caseId}`;
+        }
+
+        const resolved_case_key = resolvedCaseKey;
+
+        fallbackInfo.caseKey = resolved_case_key;
+        fallbackInfo.case_key = resolved_case_key;
+        if (resolved_case_key) caseInfo.caseKey = resolved_case_key;
+        if (resolved_case_key) {
+          if (!meta.case_key) meta.case_key = resolved_case_key;
+          if (!meta.caseKey) meta.caseKey = resolved_case_key;
+        }
+
+        if (!resolved_case_key) {
+          throw new Error('Unable to resolve case folder key');
+        }
+
+        const caseFolder = drive_getOrCreateCaseFolderByKey_(resolved_case_key);
+        const caseFolderId = caseFolder.getId();
+        caseInfo.folderId = caseFolderId;
+        caseInfo.caseKey = resolved_case_key;
+        caseInfo.case_key = resolved_case_key;
+        const effectiveUserKey =
+          caseInfo.userKey ||
+          fallbackInfo.userKey ||
+          (resolved_case_key && resolved_case_key.indexOf('-') >= 0
+            ? resolved_case_key.split('-')[0]
+            : '');
+        if (effectiveUserKey) {
+          caseInfo.userKey = effectiveUserKey;
+          caseInfo.user_key = effectiveUserKey;
+          fallbackInfo.userKey = effectiveUserKey;
+          fallbackInfo.user_key = effectiveUserKey;
+        }
+        if (fallbackInfo.lineId && !caseInfo.lineId) caseInfo.lineId = fallbackInfo.lineId;
+
+        if (parsed && parsed.meta) {
+          if (!parsed.meta.case_id) parsed.meta.case_id = caseId;
+          if (!parsed.meta.case_key) parsed.meta.case_key = resolved_case_key;
+          if (!parsed.meta.caseKey) parsed.meta.caseKey = resolved_case_key;
+          if (!parsed.meta.user_key && (caseInfo.userKey || caseInfo.user_key)) {
+            parsed.meta.user_key = caseInfo.userKey || caseInfo.user_key;
+          }
+          if (!parsed.meta.userKey && (caseInfo.userKey || caseInfo.user_key)) {
+            parsed.meta.userKey = caseInfo.userKey || caseInfo.user_key;
+          }
+        }
+        try {
+          Logger.log(
+            '[Intake] allocated case_id=%s case_key=%s user_key=%s',
+            case_id,
+            resolved_case_key,
+            caseInfo.userKey || caseInfo.user_key || ''
+          );
+        } catch (_) {}
+        try {
+          Logger.log(
+            '[Intake] save target folder=%s (%s)',
+            caseFolder.getName && caseFolder.getName(),
+            caseFolderId
+          );
+        } catch (_) {}
+        try {
+          Logger.log('[Intake] json meta=%s', JSON.stringify(parsed.meta));
+        } catch (_) {}
+
+        const formKeyForStatus = String(parsed?.meta?.form_key || actualKey || '').trim();
+        if (formKeyForStatus === 'intake' && !parsed.meta.case_id) {
+          throw new Error('intake guard: meta.case_id missing before save');
+        }
+
+        if (formIntake_isDuplicateSubmission_(caseFolderId, actualKey, meta.submission_id)) {
           formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, true);
           return;
         }
 
-        const filePath = saveSubmissionJson_(caseInfo.folderId, parsed);
-        Logger.log('[Intake] saved %s', filePath);
+        const savedFile = saveSubmissionJson_(caseFolderId, parsed);
+        const file_path = `${caseFolderId}/${savedFile.getName()}`;
+        Logger.log('[Intake] saved %s', file_path);
+
+        try {
+          drive_placeFileIntoCase_(
+            savedFile,
+            parsed?.meta || parsed?.META || {},
+            {
+              caseId: caseId,
+              case_id: case_id,
+              caseKey: resolved_case_key,
+              case_key: resolved_case_key,
+              userKey: caseInfo.userKey || caseInfo.user_key,
+              user_key: caseInfo.userKey || caseInfo.user_key,
+              lineId: caseInfo.lineId,
+              line_id: caseInfo.lineId,
+            }
+          );
+        } catch (placeErr) {
+          Logger.log('[Intake] placeFile error: %s', (placeErr && placeErr.stack) || placeErr);
+        }
 
         if (typeof recordSubmission_ === 'function') {
           try {
             recordSubmission_({
-              caseId: caseInfo.caseId || meta.case_id,
+              case_id: case_id,
               form_key: actualKey,
               submission_id: meta.submission_id || '',
-              json_path: filePath,
+              json_path: file_path,
+              meta,
+              case_key: resolved_case_key,
+              user_key: caseInfo.userKey || caseInfo.user_key,
+              line_id: caseInfo.lineId,
             });
           } catch (recErr) {
             Logger.log('[Intake] recordSubmission_ error: %s', (recErr && recErr.stack) || recErr);
@@ -160,8 +378,12 @@ function run_ProcessInbox_AllForms() {
 
         if (typeof updateCasesRow_ === 'function') {
           const basePatch = {};
-          basePatch.lastActivity = new Date();
-          if (def.statusAfterSave) basePatch.status = def.statusAfterSave;
+          basePatch.last_activity = new Date();
+          if (formKeyForStatus === 'intake') {
+            basePatch.status = 'intake';
+          } else if (def.statusAfterSave) {
+            basePatch.status = def.statusAfterSave;
+          }
           if (typeof def.afterSave === 'function') {
             try {
               const extra = def.afterSave(caseInfo, parsed) || {};
@@ -172,7 +394,12 @@ function run_ProcessInbox_AllForms() {
               Logger.log('[Intake] afterSave error: %s', (e && e.stack) || e);
             }
           }
-          updateCasesRow_(meta.case_id, basePatch);
+          basePatch.case_key = resolved_case_key;
+          basePatch.folder_id = caseFolderId;
+          if (caseInfo.userKey || caseInfo.user_key) {
+            basePatch.user_key = caseInfo.userKey || caseInfo.user_key;
+          }
+          updateCasesRow_(case_id, basePatch);
         }
 
         formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, true);

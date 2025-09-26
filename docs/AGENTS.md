@@ -148,6 +148,19 @@ npx clasp deploy        # 新バージョンをデプロイ（Web App）
 - `Logger.log` / 実行ログ（Apps Script ダッシュボード）。
 - 必要に応じて Stackdriver（現在の名称）相当のログ出力を追加。
 
+**スプレッドシート列命名規約**
+
+- `contacts`, `cases`, `cases_forms`, `submissions` など運用シートの列名は **snake_case**（例: `case_id`, `line_id`, `can_edit`）に統一します。
+- 互換ユーティリティ（`bs_toIndexMap_`, `sheetsRepo_getValue_` など）が camelCase も吸収しますが、新規列は必ず snake_case で追加してください。
+- 列追加・名称変更時は、関連スクリプト（`sheets_repo.js`, `bootstrap.js`, `status_api.js` など）の alias 対応を確認した上で反映します。
+
+**Status API 運用メモ**
+
+- `/exec?action=markReopen` は **POST + JSON (Content-Type: application/json)** で送信します。GET 要求は 405 となるため禁止です。
+- `status_api_collectStaging_` が `_staging` 配下の `intake__*.json` を案件フォルダへ吸い上げるため、`status`/`markReopen` を呼び出すとステージングが自動整理されます。
+- 冪等性確保のため、同一 `ts/sig` の再送は `nonce_reused` エラーになります。再送時は `ts` を更新して署名を再計算してください。
+- intake フォーム通知（`form_key: intake`）には `case_id` は含まれません。GAS で採番した値を JSON へ書き戻してから案件フォルダへ保存することが前提です。
+
 ---
 
 ### 5.3 `gas/tools/`（GAS ユーティリティ）
