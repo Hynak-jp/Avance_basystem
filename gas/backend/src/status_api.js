@@ -71,6 +71,25 @@ function statusApi_normalizeBool_(v) {
   return s === 'true' || s === '1' || s === 'yes';
 }
 
+// ===== 互換ユーティリティ（snake/camel 両対応） =====
+function statusApi_toCamel_(s) {
+  return String(s || '').replace(/_([a-z0-9])/g, function (_, c) {
+    return c.toUpperCase();
+  });
+}
+
+function statusApi_addCamelMirrors_(obj) {
+  var out = Object.assign({}, obj);
+  Object.keys(obj || {}).forEach(function (k) {
+    if (k && k.indexOf('_') >= 0) {
+      var camel = statusApi_toCamel_(k);
+      if (!(camel in out)) out[camel] = obj[k];
+    }
+  });
+  return out;
+}
+
+
 function statusApi_collectStaging_(lineId, caseId) {
   const lid = String(lineId || '').trim();
   const cid = String(caseId || '').trim();
@@ -107,19 +126,22 @@ function doGet(e) {
       }
       statusApi_collectStaging_(lineId, caseId);
       const forms = getCaseForms_(caseId).map(function (row) {
-        const canEdit = statusApi_normalizeBool_(row.canEdit);
-        const formKey = String(row.form_key || '').trim();
-        return {
-          caseId: String(row.caseId || caseId || ''),
-          form_key: formKey,
-          status: row.status || '',
-          canEdit: canEdit,
-          reopened_at: row.reopened_at || null,
-          locked_reason: row.locked_reason || null,
-          reopen_until: row.reopen_until || null,
-          last_seq: formKey ? getLastSeq_(caseId, formKey) : 0,
-        };
-      });
+  const formKey = String(row.form_key || '').trim();
+  const snake = {
+    case_id: String(row.case_id || row.caseId || caseId || ''),
+    form_key: formKey,
+    status: row.status || '',
+    can_edit: statusApi_normalizeBool_(row.can_edit != null ? row.can_edit : row.canEdit),
+    reopened_at: row.reopened_at || null,
+    locked_reason: row.locked_reason || null,
+    reopen_until: row.reopen_until || null,
+    last_seq: formKey ? getLastSeq_(caseId, formKey) : 0,
+  };
+  const compat = statusApi_addCamelMirrors_(snake);
+  compat.caseId = String(row.caseId || caseId || '');
+  if (!('canEdit' in compat)) compat.canEdit = compat.can_edit;
+  return compat;
+});
       return statusApi_jsonOut_({ ok: true, caseId: caseId, forms: forms }, 200);
     }
 

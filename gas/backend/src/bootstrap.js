@@ -552,6 +552,28 @@ function bs_collectIntakeFromStaging_(lineId, caseId) {
                   } catch (_) {}
                 }
               }
+              // 受領記録（submissions/cases_forms 更新）
+              try {
+                var text = '';
+                var data = null;
+                try { text = file.getBlob().getDataAsString('utf-8'); } catch (_e) {}
+                try { data = JSON.parse(text); } catch (_e2) {}
+                var sid = '';
+                if (data && typeof data === 'object') {
+                  sid = String((data.submission_id) || (data.meta && data.meta.submission_id) || '').trim();
+                }
+                if (typeof recordSubmission_ === 'function') {
+                  recordSubmission_({
+                    case_id: normalizedCaseId,
+                    form_key: 'intake',
+                    submission_id: sid,
+                    json_path: file.getName(),
+                    meta: (data && data.meta) ? data.meta : { case_id: normalizedCaseId, line_id: lineId }
+                  });
+                }
+              } catch (e3) {
+                try { Logger.log('[bs_collectIntakeFromStaging_] recordSubmission error: %s', (e3 && e3.stack) || e3); } catch (_) {}
+              }
             } catch (err) {
               try {
                 Logger.log(

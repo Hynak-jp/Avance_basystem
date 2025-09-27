@@ -266,3 +266,58 @@ function sheetsRepo_hasSubmission_(caseId, formKey, submissionId) {
     );
   });
 }
+
+
+/**
+ * contacts シートから email 一致で user_key を取得（見つからなければ空文字）。
+ */
+function lookupUserKeyByEmail_(email) {
+  try {
+    const sh = bs_getSheet_('contacts');
+    const lastRow = sh.getLastRow();
+    if (lastRow < 2) return '';
+    const lastCol = sh.getLastColumn();
+    const headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+    const idx = (typeof buildHeaderIndexMap_ === 'function') ? buildHeaderIndexMap_(headers) : bs_toIndexMap_(headers);
+    const colEmail = idx['email'] != null ? idx['email'] : (idx['Email'] != null ? idx['Email'] : idx['mail']);
+    const colUserKey = (idx['user_key'] != null ? idx['user_key'] : idx['userKey']);
+    if (colEmail == null || colUserKey == null) return '';
+    const rows = sh.getRange(2, 1, lastRow - 1, lastCol).getValues();
+    const want = String(email || '').trim().toLowerCase();
+    for (let i = 0; i < rows.length; i++) {
+      const ev = String(rows[i][colEmail] || '').trim().toLowerCase();
+      if (ev && ev === want) {
+        const uk = String(rows[i][colUserKey] || '').trim();
+        if (uk) return uk;
+      }
+    }
+  } catch (_) {}
+  return '';
+}
+
+/**
+ * contacts シートから user_key 一致で line_id を取得（見つからなければ空文字）。
+ */
+function lookupLineIdByUserKey_(userKey) {
+  try {
+    const sh = bs_getSheet_('contacts');
+    const lastRow = sh.getLastRow();
+    if (lastRow < 2) return '';
+    const lastCol = sh.getLastColumn();
+    const headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+    const idx = (typeof buildHeaderIndexMap_ === 'function') ? buildHeaderIndexMap_(headers) : bs_toIndexMap_(headers);
+    const colUserKey = (idx['user_key'] != null ? idx['user_key'] : idx['userKey']);
+    const colLineId = (idx['line_id'] != null ? idx['line_id'] : idx['lineId']);
+    if (colUserKey == null || colLineId == null) return '';
+    const rows = sh.getRange(2, 1, lastRow - 1, lastCol).getValues();
+    const want = String(userKey || '').trim();
+    for (let i = 0; i < rows.length; i++) {
+      const uk = String(rows[i][colUserKey] || '').trim();
+      if (uk && uk === want) {
+        const lid = String(rows[i][colLineId] || '').trim();
+        if (lid) return lid;
+      }
+    }
+  } catch (_) {}
+  return '';
+}

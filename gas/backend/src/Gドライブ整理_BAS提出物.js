@@ -1599,80 +1599,70 @@ function ensureUserRootFolder_(displayName, userKey) {
 
 function upsertContact_(ss, lineId, displayName) {
   const sh = ss.getSheetByName('contacts') || ss.insertSheet('contacts');
-  if (sh.getLastRow() === 0)
-    sh.appendRow([
-      'lineId',
-      'displayName',
-      'userKey',
-      'rootFolderId',
-      'nextCaseSeq',
-      'activeCaseId',
-    ]);
+  // 新規は snake_case で初期化
+  if (sh.getLastRow() === 0) {
+    sh.appendRow(['line_id','display_name','user_key','root_folder_id','next_case_seq','active_case_id']);
+  }
+  const header = sh.getRange(1,1,1,Math.max(1,sh.getLastColumn())).getValues()[0].map(String);
+  let idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
+    : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
 
-  // 既存ヘッダのマップを作成（両表記サポート）
-  const values = sh.getDataRange().getValues();
-  const header = values[0] || [];
-  const idx = header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
-
-  // 必要列が無ければ末尾に追加
-  const ensureCols = [
-    'lineId',
-    'displayName',
-    'userKey',
-    'rootFolderId',
-    'nextCaseSeq',
-    'activeCaseId',
-  ];
-  ensureCols.forEach((k) => {
-    if (!(k in idx)) {
-      sh.insertColumnAfter(sh.getLastColumn());
-      sh.getRange(1, sh.getLastColumn()).setValue(k);
-      idx[k] = sh.getLastColumn() - 1; // 再取得は省略（この場では未使用のため）
+  const HEADERS = {};
+  HEADERS[K.lineId] = 'line_id';
+  HEADERS[K.displayName] = 'display_name';
+  HEADERS[K.userKey] = 'user_key';
+  HEADERS[K.rootFolderId] = 'root_folder_id';
+  HEADERS[K.nextCaseSeq] = 'next_case_seq';
+  HEADERS[K.activeCaseId] = 'active_case_id';
+  Object.keys(HEADERS).forEach((canon) => {
+    if (idxMap[canon] === undefined) {
+      const col = sh.getLastColumn() + 1;
+      sh.getRange(1,col).setValue(HEADERS[canon]);
+      header.push(HEADERS[canon]);
+      idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
+        : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
     }
   });
 
-  // 既存行検索（lineId）
-  let row = -1;
-  const colLineId = idx.lineId !== undefined ? idx.lineId : idx['line_id'];
-  const colDisplay = idx.displayName !== undefined ? idx.displayName : idx['display_name'];
-  for (let r = 1; r < values.length; r++) {
-    if (String(values[r][colLineId] || '') === String(lineId)) {
-      row = r;
-      break;
-    }
+  const rowCount = sh.getLastRow() - 1;
+  const lastCol = sh.getLastColumn();
+  const values = rowCount>0 ? sh.getRange(2,1,rowCount,lastCol).getValues() : [];
+
+  let targetRow = -1; // 1-based
+  const colLine0 = idxMap[K.lineId];
+  for (let i=0;i<values.length;i++){
+    if (String(values[i][colLine0]||'') === String(lineId)) { targetRow = i+2; break; }
   }
 
-  if (row === -1) {
-    const userKey = makeUserKey_(lineId);
+  const userKey = makeUserKey_(lineId);
+  if (targetRow === -1) {
+    sh.appendRow(new Array(lastCol).fill(''));
+    targetRow = sh.getLastRow();
     const root = ensureUserRootFolder_(displayName, userKey);
-    // 既存ヘッダの並びに合わせて行を構築
-    const rowVals = new Array(sh.getLastColumn()).fill('');
-    rowVals[colLineId] = lineId;
-    if (colDisplay !== undefined) rowVals[colDisplay] = displayName;
-    rowVals[idx.userKey] = userKey;
-    rowVals[idx.rootFolderId] = root.getId();
-    rowVals[idx.nextCaseSeq] = 0;
-    rowVals[idx.activeCaseId] = '';
-    sh.appendRow(rowVals);
-    return {
-      lineId,
-      displayName,
-      userKey,
-      rootFolderId: root.getId(),
-      nextCaseSeq: 0,
-      activeCaseId: '',
-    };
+    setCellByKey_(sh, targetRow, idxMap, K.lineId, lineId);
+    setCellByKey_(sh, targetRow, idxMap, K.displayName, displayName || '');
+    setCellByKey_(sh, targetRow, idxMap, K.userKey, userKey);
+    setCellByKey_(sh, targetRow, idxMap, K.rootFolderId, root.getId());
+    setCellByKey_(sh, targetRow, idxMap, K.nextCaseSeq, 0);
+    setCellByKey_(sh, targetRow, idxMap, K.activeCaseId, '');
+    return { lineId, displayName, userKey, rootFolderId: root.getId(), nextCaseSeq: 0, activeCaseId: '' };
   } else {
-    const userKey = values[row][idx.userKey] || makeUserKey_(lineId);
-    const rootId =
-      values[row][idx.rootFolderId] || ensureUserRootFolder_(displayName, userKey).getId();
+    const rowVals = sh.getRange(targetRow,1,1,lastCol).getValues()[0];
+    const currentUserKey = String(getCellByKey_(rowVals, idxMap, K.userKey) || '') || userKey;
+    let rootId = String(getCellByKey_(rowVals, idxMap, K.rootFolderId) || '');
+    if (!rootId) rootId = ensureUserRootFolder_(displayName, currentUserKey).getId();
+    if (!getCellByKey_(rowVals, idxMap, K.displayName) && displayName) {
+      setCellByKey_(sh, targetRow, idxMap, K.displayName, displayName);
+    }
+    setCellByKey_(sh, targetRow, idxMap, K.userKey, currentUserKey);
+    setCellByKey_(sh, targetRow, idxMap, K.rootFolderId, rootId);
     return {
       lineId,
-      displayName: values[row][colDisplay] || displayName,
-      userKey,
+      displayName: String(getCellByKey_(rowVals, idxMap, K.displayName) || displayName || ''),
+      userKey: currentUserKey,
       rootFolderId: rootId,
-      nextCaseSeq: values[row][idx.nextCaseSeq] || 0,
-      activeCaseId: values[row][idx.activeCaseId] || '',
+      nextCaseSeq: Number(getCellByKey_(rowVals, idxMap, K.nextCaseSeq) || 0) || 0,
+      activeCaseId: String(getCellByKey_(rowVals, idxMap, K.activeCaseId) || ''),
     };
   }
 }
@@ -1680,18 +1670,33 @@ function upsertContact_(ss, lineId, displayName) {
 function allocateNextCaseId_(lineId) {
   const ss = openOrCreateMaster_();
   const sh = ss.getSheetByName('contacts');
-  const values = sh.getDataRange().getValues();
-  const header = values[0] || [];
-  const idx = header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
-  for (let r = 1; r < values.length; r++) {
-    const colLineId = idx.lineId !== undefined ? idx.lineId : idx['line_id'];
-    const colNext = idx.nextCaseSeq;
-    if (String(values[r][colLineId]) === String(lineId)) {
-      let cur = parseInt(values[r][idx.nextCaseSeq] || 0, 10);
-      if (isNaN(cur)) cur = 0;
+  const header = sh.getRange(1,1,1,Math.max(1,sh.getLastColumn())).getValues()[0].map(String);
+  let idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
+    : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+  const ensureKey = (canon, headerName) => {
+    if (idxMap[canon] === undefined) {
+      const col = sh.getLastColumn()+1;
+      sh.getRange(1,col).setValue(headerName);
+      header.push(headerName);
+      idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
+        : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+    }
+  };
+  ensureKey(K.lineId, 'line_id');
+  ensureKey(K.nextCaseSeq, 'next_case_seq');
+
+  const rowCount = sh.getLastRow()-1;
+  const lastCol = sh.getLastColumn();
+  const rows = rowCount>0 ? sh.getRange(2,1,rowCount,lastCol).getValues() : [];
+  const colLine0 = idxMap[K.lineId];
+  const colNext0 = idxMap[K.nextCaseSeq];
+  for (let i=0;i<rows.length;i++){
+    if (String(rows[i][colLine0]||'') === String(lineId)) {
+      let cur = parseInt(rows[i][colNext0] || 0, 10);
+      if (!isFinite(cur)) cur = 0;
       const next = cur + 1;
-      const padded = String(next).padStart(4, '0');
-      sh.getRange(r + 1, colNext + 1).setValue(next);
+      const padded = String(next).padStart(4,'0');
+      sh.getRange(i+2, colNext0+1).setValue(next);
       return padded;
     }
   }
@@ -1700,14 +1705,28 @@ function allocateNextCaseId_(lineId) {
 
 function setActiveCaseId_(ss, lineId, caseId) {
   const sh = ss.getSheetByName('contacts');
-  const values = sh.getDataRange().getValues();
-  const header = values[0] || [];
-  const idx = header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
-  for (let r = 1; r < values.length; r++) {
-    const colLineId = idx.lineId !== undefined ? idx.lineId : idx['line_id'];
-    const colActive = idx.activeCaseId;
-    if (String(values[r][colLineId]) === String(lineId)) {
-      sh.getRange(r + 1, colActive + 1).setValue(caseId);
+  if (!sh) return;
+  const header = sh.getRange(1,1,1,Math.max(1,sh.getLastColumn())).getValues()[0].map(String);
+  let idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
+    : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+  if (idxMap[K.lineId] === undefined) {
+    const col = sh.getLastColumn()+1; sh.getRange(1,col).setValue('line_id'); header.push('line_id');
+    idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
+      : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+  }
+  if (idxMap[K.activeCaseId] === undefined) {
+    const col = sh.getLastColumn()+1; sh.getRange(1,col).setValue('active_case_id'); header.push('active_case_id');
+    idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
+      : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+  }
+  const rowCount = sh.getLastRow()-1;
+  if (rowCount < 1) return;
+  const lastCol = sh.getLastColumn();
+  const rows = sh.getRange(2,1,rowCount,lastCol).getValues();
+  const colLine0 = idxMap[K.lineId];
+  for (let i=0;i<rows.length;i++){
+    if (String(rows[i][colLine0]||'') === String(lineId)) {
+      setCellByKey_(sh, i+2, idxMap, K.activeCaseId, caseId);
       return;
     }
   }
@@ -1716,10 +1735,20 @@ function setActiveCaseId_(ss, lineId, caseId) {
 function casesAppend_(lineId, caseId) {
   const ss = openOrCreateMaster_();
   const sh = ss.getSheetByName('cases') || ss.insertSheet('cases');
-  if (sh.getLastRow() === 0)
-    sh.appendRow(['line_id', 'case_id', 'created_at', 'status', 'last_activity']);
+  if (sh.getLastRow() === 0) {
+    sh.appendRow(['line_id','case_id','created_at','status','last_activity']);
+  }
+  const header = sh.getRange(1,1,1,Math.max(1,sh.getLastColumn())).getValues()[0].map(String);
+  const idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
+    : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+  sh.appendRow(new Array(sh.getLastColumn()).fill(''));
+  const row1 = sh.getLastRow();
   const now = new Date();
-  sh.appendRow([lineId, caseId, now, 'draft', now]);
+  setCellByKey_(sh, row1, idxMap, K.lineId, lineId);
+  setCellByKey_(sh, row1, idxMap, K.caseId, caseId);
+  setCellByKey_(sh, row1, idxMap, K.createdAt, now);
+  setCellByKey_(sh, row1, idxMap, K.status, 'draft');
+  setCellByKey_(sh, row1, idxMap, K.lastActivity, now);
 }
 
 function resolveCaseId_(mailPlainBody, subject, lineId) {
@@ -1727,15 +1756,18 @@ function resolveCaseId_(mailPlainBody, subject, lineId) {
   if (meta.case_id) return String(meta.case_id).trim();
   const ss = openOrCreateMaster_();
   const sh = ss.getSheetByName('contacts');
-  const values = sh.getDataRange().getValues();
-  const header = values[0] || [];
-  const idx = header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
-  for (let r = 1; r < values.length; r++) {
-    const colLineId = idx.lineId !== undefined ? idx.lineId : idx['line_id'];
-    const colActive = idx.activeCaseId;
-    if (String(values[r][colLineId]) === String(lineId)) {
-      const active = values[r][colActive] || '';
-      return String(active || '');
+  const header = sh.getRange(1,1,1,Math.max(1,sh.getLastColumn())).getValues()[0].map(String);
+  const idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
+    : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+  const rowCount = sh.getLastRow() - 1;
+  if (rowCount < 1) return '';
+  const rows = sh.getRange(2,1,rowCount,sh.getLastColumn()).getValues();
+  const colLine0 = idxMap[K.lineId];
+  const colActive0 = idxMap[K.activeCaseId];
+  if (colLine0 === undefined || colActive0 === undefined) return '';
+  for (let i=0;i<rows.length;i++){
+    if (String(rows[i][colLine0]||'') === String(lineId)) {
+      return String(rows[i][colActive0] || '');
     }
   }
   return '';

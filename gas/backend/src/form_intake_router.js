@@ -26,6 +26,22 @@ function resolveCaseByCaseIdSmart_(caseId) {
 }
 
 const FORM_INTAKE_REGISTRY = {
+  intake: {
+    name: '初回受付',
+    queueLabel: 'BAS/Intake/Queue',
+    parser: function (subject, body) {
+      if (typeof parseMetaBlock_ !== 'function') {
+        throw new Error('parseMetaBlock_ is not defined');
+      }
+      const meta = parseMetaBlock_(body) || {};
+      if (!meta.form_key) meta.form_key = 'intake';
+      return { meta, fieldsRaw: [], model: {} };
+    },
+    caseResolver: resolveCaseByCaseIdSmart_,
+    statusAfterSave: 'intake',
+    afterSave: function () { return {}; },
+  },
+
   s2010_p1_career: {
     name: 'S2010 Part1(経歴等)',
     queueLabel: 'BAS/S2010P1/Queue',
@@ -100,6 +116,12 @@ function formIntake_normalizeUserKey_(value) {
 }
 
 function formIntake_generateUserKey_(meta) {
+  // intake はメールだけでは user_key を決めない（誤決定を防ぐ）
+  try {
+    const fk = String((meta && (meta.form_key || meta.formKey)) || '').trim();
+    if (fk === 'intake') return '';
+  } catch (_) {}
+
   const sources = [
     meta && meta.user_key,
     meta && meta.userKey,
@@ -327,8 +349,42 @@ function run_ProcessInbox_AllForms() {
         } catch (_) {}
 
         const formKeyForStatus = String(parsed?.meta?.form_key || actualKey || '').trim();
-        if (formKeyForStatus === 'intake' && !parsed.meta.case_id) {
-          throw new Error('intake guard: meta.case_id missing before save');
+
+        // intake はケース直行せず、必ず staging へ保存（後続の status_api で吸い上げ）
+        if (formKeyForStatus === 'intake') {
+          try {
+            const P = PropertiesService.getScriptProperties();
+            const EXPECT = String(P.getProperty('NOTIFY_SECRET') || '').trim();
+            const ALLOW_NO_SECRET = (P.getProperty('ALLOW_NO_SECRET') || '').toLowerCase() === '1';
+            const provided = String((meta && meta.secret) || '').trim();
+            if (EXPECT && !ALLOW_NO_SECRET && provided !== EXPECT) {
+              try { Logger.log('[Intake] secret mismatch: meta.secret=%s', provided || '(empty)'); } catch (_) {}
+              formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, false);
+              return;
+            }
+          } catch (_) {}
+
+          if (!meta.submission_id) {
+            meta.submission_id =
+              meta.submissionId ||
+              (typeof Utilities !== 'undefined' && typeof Utilities.getUuid === 'function'
+                ? Utilities.getUuid()
+                : String(Date.now()));
+            if (!meta.submissionId) meta.submissionId = meta.submission_id;
+            parsed.meta = meta;
+          }
+
+          const P = PropertiesService.getScriptProperties();
+          const ROOT_ID = P.getProperty('DRIVE_ROOT_FOLDER_ID') || P.getProperty('ROOT_FOLDER_ID');
+          const root = DriveApp.getFolderById(ROOT_ID);
+          const it = root.getFoldersByName('_email_staging');
+          const staging = it.hasNext() ? it.next() : root.createFolder('_email_staging');
+          const fname = `intake__${meta.submission_id}.json`;
+          const blob = Utilities.newBlob(JSON.stringify(parsed, null, 2), 'application/json', fname);
+          staging.createFile(blob);
+          try { Logger.log('[Intake] staged %s', fname); } catch (_) {}
+          formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, true);
+          return;
         }
 
         if (formIntake_isDuplicateSubmission_(caseFolderId, actualKey, meta.submission_id)) {
