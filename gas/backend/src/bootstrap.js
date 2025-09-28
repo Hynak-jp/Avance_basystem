@@ -24,6 +24,13 @@ if (typeof getSecret_ !== 'function') {
   };
 }
 
+// フォールバック: userKey 推定（lineId 先頭6小文字）
+if (typeof drive_userKeyFromLineId_ !== 'function') {
+  var drive_userKeyFromLineId_ = function (lineId) {
+    return String(lineId || '').slice(0, 6).toLowerCase();
+  };
+}
+
 // 追加：タイミング安全な比較
 function safeCompare_(a, b) {
   a = String(a || '');
@@ -45,7 +52,6 @@ const BS_MASTER_SPREADSHEET_ID = props_().getProperty('BAS_MASTER_SPREADSHEET_ID
 // 両対応: DRIVE_ROOT_FOLDER_ID / ROOT_FOLDER_ID
 const DRIVE_ROOT_ID =
   props_().getProperty('DRIVE_ROOT_FOLDER_ID') || props_().getProperty('ROOT_FOLDER_ID'); // BAS_提出書類 ルート
-const BAS_BOOTSTRAP_SECRET = props_().getProperty('BOOTSTRAP_SECRET') || ''; // 衝突回避のためユニーク名
 const LOG_SHEET_ID = props_().getProperty('GAS_LOG_SHEET_ID') || ''; // 任意（空で無効）
 const ALLOW_DEBUG = (props_().getProperty('ALLOW_DEBUG') || '').toLowerCase() === '1'; //
 
@@ -67,21 +73,6 @@ function bs_caseFolderName_(userKey, rawCaseId) {
 }
 
 /** ===== ログユーティリティ（安全に短く） ===== */
-function logCtx_(label, obj) {
-  try {
-    var safe = JSON.parse(
-      JSON.stringify(obj, (k, v) => {
-        if (k === 'sig') return String(v || '').slice(0, 6) + '…' + String(v || '').slice(-6); // 先頭末尾だけ
-        if (k === 'p') return '[payload omitted]';
-        if (k === 'secret' || k === 'token' || k === 'key') return '<redacted>';
-        return v;
-      })
-    );
-    console.info('BAS:' + label + ' ' + JSON.stringify(safe));
-  } catch (_) {
-    console.info('BAS:' + label + ' <unserializable>');
-  }
-}
 
 /** ========= 1) 先頭：共通ユーティリティ（ファイルの上のほうに） ========= */
 function redact_(s, show = 4) {
@@ -211,41 +202,61 @@ function bootstrap_(e) {
 
   // [LOG-2] 署名検証（p有無どちらでも観測）
   const auth = parseAuth_(q);
-  logCtx_('bootstrap:auth', {
-    ok: auth.ok,
-    li_present: !!auth.line_id,
-    ci_present: !!auth.case_id,
-  });
-  if (!auth.ok) {
-    console.error('BAS:auth:failed');
-    return ContentService.createTextOutput(
-      JSON.stringify({ ok: false, error: 'invalid sig' })
-    ).setMimeType(ContentService.MimeType.JSON);
+  logCtx_('bootstrap:auth', { ok: auth.ok, li_present: !!auth.line_id, ci_present: !!auth.case_id });
+  if (!auth.ok) return bs_jsonResponse_({ ok: false, error: 'invalid sig' }, 400);
+
+  // [LOG-3] マスタ/Drive の存在確認
+  try { bs_ensureMaster_(); } catch (err) { return bs_jsonResponse_({ ok:false, error: String(err) }, 500); }
+  try { bs_ensureDriveRoot_(); } catch (err) { return bs_jsonResponse_({ ok:false, error: String(err) }, 500); }
+
+  // [LOG-4] contacts upsert（userKeyは lineId から推定）
+  const lineId = String(auth.line_id || '').trim();
+  const userKey = drive_userKeyFromLineId_(lineId);
+  const up = bs_upsertContact_({ userKey, lineId, displayName: '', email: '' });
+  logCtx_('contacts:upsert:done', { row: up.row, userKey });
+
+  // [LOG-5] caseId 確保（既存が無ければ採番）
+  const sh = bs_getSheet_(SHEET_CONTACTS);
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const idx = bs_toIndexMap_(headers);
+  const rowVals = sh.getRange(up.row, 1, 1, headers.length).getValues()[0];
+  const activeIdx = typeof idx['active_case_id'] === 'number' ? idx['active_case_id'] : idx['activeCaseId'];
+  let caseId = activeIdx >= 0 ? bs_normCaseId_(rowVals[activeIdx] || '') : '';
+  if (!caseId) {
+    const issued = bs_issueCaseId_(userKey, lineId);
+    caseId = bs_normCaseId_(issued.caseId);
+    if (activeIdx >= 0) sh.getRange(up.row, activeIdx + 1).setValue(caseId);
+  } else {
+    // 既存 caseId の場合でも、cases 行が無ければ作っておく
+    try { bs_ensureCaseRow_(caseId, userKey, lineId); } catch (_) {}
   }
 
-  // 以降は既存の処理にログを添える（関数名はあなたの実装に合わせて）
-  // [LOG-3] contacts upsert の直前/直後
-  logCtx_('contacts:upsert:begin', { line_id: redact_(auth.line_id) });
-  const contact = upsertContact_(auth.line_id); // ←あなたの実装を呼ぶ
-  logCtx_('contacts:upsert:done', {
-    user_key: contact.user_key,
-    have_active_case: !!contact.active_case_id,
-  });
+  // [LOG-6] フォルダ保証 + cases に folder_id/status 書き戻し
+  let folderId = '';
+  try { folderId = bs_ensureCaseFolder_(userKey, caseId); } catch (_) {}
+  try {
+    const shCases = bs_getSheet_(SHEET_CASES);
+    const h2 = shCases.getRange(1, 1, 1, shCases.getLastColumn()).getValues()[0];
+    const i2 = bs_toIndexMap_(h2);
+    const rc = shCases.getLastRow() - 1;
+    const colCase = i2['case_id'] != null ? i2['case_id'] : i2['caseId'];
+    const colFolder = i2['folder_id'] != null ? i2['folder_id'] : i2['folderId'];
+    const colStatus = i2['status'];
+    if (rc > 0 && colCase != null) {
+      const rows = shCases.getRange(2, 1, rc, h2.length).getValues();
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (bs_normCaseId_(rows[i][colCase]) === caseId) {
+          if (colFolder != null && folderId) shCases.getRange(i + 2, colFolder + 1).setValue(folderId);
+          if (colStatus != null) shCases.getRange(i + 2, colStatus + 1).setValue('intake');
+          break;
+        }
+      }
+    }
+  } catch (_) {}
 
-  // [LOG-4] case 確保（採番/既存紐付け）
-  const c = ensureCaseForContact_(auth.line_id, contact); // ←あなたの実装を呼ぶ
-  logCtx_('cases:ensure:done', {
-    case_id: c.case_id,
-    case_key: c.case_key,
-    has_folder: !!c.folder_id,
-  });
-
-  // [LOG-5] レスポンス直前（フロントが見るフラグも）
-  const resp = { ok: true, case_id: c.case_id, caseFolderReady: !!c.folder_id };
+  const resp = { ok: true, case_id: caseId, caseFolderReady: !!folderId };
   logCtx_('bootstrap:resp', resp);
-  return ContentService.createTextOutput(JSON.stringify(resp)).setMimeType(
-    ContentService.MimeType.JSON
-  );
+  return bs_jsonResponse_(resp, 200);
 }
 
 /** ---------- ユーティリティ ---------- **/
@@ -333,6 +344,40 @@ function bs_getSheet_(name) {
   return sh;
 }
 
+/** cases 行を保証（無ければ追記して row# を返す） */
+function bs_ensureCaseRow_(caseId, userKey, lineId) {
+  const sh = bs_getSheet_(SHEET_CASES);
+  if (sh.getLastRow() < 1) {
+    sh.getRange(1, 1, 1, 6).setValues([[
+      'case_id', 'user_key', 'line_id', 'status', 'folder_id', 'created_at',
+    ]]);
+  }
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const idx = bs_toIndexMap_(headers);
+  const caseIdx = idx['case_id'] != null ? idx['case_id'] : idx['caseId'];
+  const userIdx = idx['user_key'] != null ? idx['user_key'] : idx['userKey'];
+  const lineIdx = idx['line_id']  != null ? idx['line_id']  : idx['lineId'];
+  const statusIdx = idx['status'];
+  const folderIdx = idx['folder_id'] != null ? idx['folder_id'] : idx['folderId'];
+  const createdIdx = idx['created_at'] != null ? idx['created_at'] : idx['createdAt'];
+  const rc = sh.getLastRow() - 1;
+  if (rc > 0 && caseIdx != null) {
+    const rows = sh.getRange(2, 1, rc, headers.length).getValues();
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (bs_normCaseId_(rows[i][caseIdx]) === bs_normCaseId_(caseId)) return i + 2;
+    }
+  }
+  const now = new Date().toISOString();
+  const row = new Array(headers.length).fill('');
+  if (caseIdx   != null) row[caseIdx]   = bs_normCaseId_(caseId);
+  if (userIdx   != null) row[userIdx]   = userKey || '';
+  if (lineIdx   != null) row[lineIdx]   = lineId  || '';
+  if (statusIdx != null) row[statusIdx] = 'draft';
+  if (createdIdx!= null) row[createdIdx]= now;
+  sh.appendRow(row);
+  return sh.getLastRow();
+}
+
 function bs_headerAliases_(raw) {
   const value = String(raw == null ? '' : raw).trim();
   if (!value) return [];
@@ -385,7 +430,7 @@ function bs_ensureMaster_() {
 
 function bs_ensureDriveRoot_() {
   const rid = DRIVE_ROOT_ID;
-  if (!rid) throw new Error('ROOT_FOLDER_ID is empty');
+  if (!rid) throw new Error('DRIVE_ROOT_FOLDER_ID/ROOT_FOLDER_ID is empty');
   DriveApp.getFolderById(rid); // 存在チェック。権限が無ければここで例外。
 }
 
@@ -891,7 +936,7 @@ function doPost(e) {
       ).setMimeType(ContentService.MimeType.JSON);
     }
     if (wantDebug && ALLOW_DEBUG) {
-      const SECRET = PropertiesService.getScriptProperties().getProperty('BOOTSTRAP_SECRET') || '';
+      const SECRET = getSecret_();
       const base = lineId + '|' + ts;
       const raw = Utilities.computeHmacSha256Signature(base, SECRET, Utilities.Charset.UTF_8);
       const expect = Utilities.base64EncodeWebSafe(raw).replace(/=+$/, '');
@@ -902,19 +947,7 @@ function doPost(e) {
         .slice(0, 16);
 
       return ContentService.createTextOutput(
-        JSON.stringify({
-          ok: true,
-          VER,
-          base,
-          lineId,
-          ts,
-          providedSig,
-          expect,
-          secretLen: SECRET.length,
-          secretFP,
-          // 本番でも漏れないレベルの指紋のみ（長さを出すのが嫌なら消してOK）
-          secretLen: SECRET.length,
-        })
+        JSON.stringify({ ok: true, VER, base, lineId, ts, providedSig, expect, secretLen: SECRET.length, secretFP })
       ).setMimeType(ContentService.MimeType.JSON);
     }
 
@@ -927,7 +960,7 @@ function doPost(e) {
     }
 
     // 通常フロー: 署名チェック（返却点はここだけ）
-    const SECRET = PropertiesService.getScriptProperties().getProperty('BOOTSTRAP_SECRET') || '';
+    const SECRET = getSecret_();
     const base = lineId + '|' + ts;
     const raw = Utilities.computeHmacSha256Signature(base, SECRET, Utilities.Charset.UTF_8);
     const expectB64Url = Utilities.base64EncodeWebSafe(raw).replace(/=+$/, '');

@@ -1,54 +1,78 @@
-// src/lib/formUrl.ts
+// formlist/src/lib/formUrl.ts
+'use server';
+import 'server-only';
 import crypto from 'crypto';
 
+const SECRET =
+  process.env.BOOTSTRAP_SECRET ??
+  process.env.TOKEN_SECRET ??
+  (() => {
+    throw new Error('Missing BOOTSTRAP_SECRET/TOKEN_SECRET');
+  })();
+
+const b64url = (s: string) => s.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+const makePayload = (lineId: string, caseId: string, ts: string) => `${lineId}|${caseId}|${ts}`;
+const signV2 = (payload: string) => b64url(crypto.createHmac('sha256', SECRET).update(payload, 'utf8').digest('base64'));
+
+function getOriginSafe(): string {
+  return process.env.NEXT_PUBLIC_BASE_URL || '';
+}
+
 type MakeFormUrlOptions = {
-  redirectUrl?: string;
-  formId?: string;
+  redirectUrl?: string; // 例: https://app.example/done?formId=309542
+  formId?: string; // 表示用（署名には使わない）
+  extra?: Record<string, string>;
 };
 
-export function makeFormUrl(
-  baseUrl: string,
-  lineId: string,
-  caseId: string,
-  options: MakeFormUrlOptions = {}
-) {
-  const ts = Date.now();
-  const secret = process.env.BOOTSTRAP_SECRET!;
+/**
+ * 送信後に戻る /done 側へ V2 署名（p/ts/sig）と lineId/caseId を付与し、
+ * その redirect_url を FormMailer 側の baseUrl にクエリで渡す。
+ */
+export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opts: MakeFormUrlOptions = {}): string {
+  const ts = Date.now().toString();
+  const payload = makePayload(lineId, caseId, ts);
+  const sig = signV2(payload);
+  const p = b64url(Buffer.from(payload, 'utf8').toString('base64'));
 
-  // FormMailerの隠しフィールドに対応
-  const params = new URLSearchParams({
-    'line_id[0]': lineId,
-    'case_id[0]': caseId,
-    ts: String(ts),
-    sig: crypto.createHmac('sha256', secret).update(`${lineId}|${caseId}|${ts}`).digest('hex'),
-  });
+  // 1) ユーザーが戻ってくるURL（自サイト）
+  const redirect = new URL(opts?.redirectUrl ?? '/', getOriginSafe());
+  redirect.searchParams.set('lineId', lineId);
+  redirect.searchParams.set('caseId', caseId);
+  redirect.searchParams.set('ts', ts);
+  redirect.searchParams.set('sig', sig);
+  redirect.searchParams.set('p', p);
+  if (opts?.formId) redirect.searchParams.set('formId', opts.formId);
+  if (opts?.extra) for (const [k, v] of Object.entries(opts.extra)) redirect.searchParams.set(k, v);
 
-  if (options.redirectUrl) {
-    params.set('redirect_url', options.redirectUrl);
-  }
-  if (options.formId) {
-    params.set('form_id', options.formId);
-  }
-
-  return `${baseUrl}?${params.toString()}`;
-}
-
-// 受付フォーム: lineId|ts で署名（caseId なし）
-// 受付フォーム（公開URL）には個人識別子を載せない。redirect_url だけ付与。
-export function makeIntakeUrl(baseUrl: string, redirectUrl: string) {
+  // 2) FormMailer 側のURLに、redirect_url を渡す
   const url = new URL(baseUrl);
-  url.searchParams.set('redirect_url', redirectUrl);
+  url.searchParams.set('redirect_url', redirect.toString());
+  url.searchParams.set('referrer', getOriginSafe());
   return url.toString();
 }
-// 署名対象: lineId|caseId|ts（formId は不要）
-// アルゴリズム: HMAC-SHA256, 出力は hex(64文字)
-// 秘密鍵: BOOTSTRAP_SECRET（環境変数）
-// caseId を含めることで URL の使い回し防止
-// ts はミリ秒の UNIX タイム。FormMailer 側で有効期限チェック可能
-// 署名は FormMailer 側で検証する前提
-//
-// アルゴリズム変更時:
-// - makeFormUrl と FormMailer 両方を更新
-// - 後方互換や段階的移行を検討
-// - セキュリティレビューと十分なテストを実施
-// - ドキュメントを更新し、関係者に周知
+
+/**
+ * intake 用。caseId は空文字で署名。
+ * intakeBase: intake の FormMailer URL
+ * intakeRedirect: intake 完了後に戻す /done のURL
+ */
+export function makeIntakeUrl(intakeBase: string, intakeRedirect: string): string {
+  const ts = Date.now().toString();
+  const lineId = '';
+  const caseId = '';
+  const payload = makePayload(lineId, caseId, ts);
+  const sig = signV2(payload);
+  const p = b64url(Buffer.from(payload, 'utf8').toString('base64'));
+
+  const redirect = new URL(intakeRedirect);
+  redirect.searchParams.set('lineId', lineId);
+  redirect.searchParams.set('caseId', caseId);
+  redirect.searchParams.set('ts', ts);
+  redirect.searchParams.set('sig', sig);
+  redirect.searchParams.set('p', p);
+
+  const url = new URL(intakeBase);
+  url.searchParams.set('redirect_url', redirect.toString());
+  url.searchParams.set('referrer', getOriginSafe());
+  return url.toString();
+}

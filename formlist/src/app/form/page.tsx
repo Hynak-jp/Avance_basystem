@@ -101,25 +101,7 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
   return { forms };
 }
 
-async function fetchIntakeStatus(lineId?: string | null, caseId?: string | null): Promise<boolean> {
-  try {
-    if (!lineId || !caseId) return false;
-    const endpoint = process.env.GAS_ENDPOINT;
-    if (!endpoint) return false;
-    const url = new URL(endpoint);
-    url.searchParams.set('route', 'status');
-    url.searchParams.set('lineId', lineId);
-    url.searchParams.set('caseId', caseId);
-    const response = await fetch(url.toString(), {
-      cache: 'no-store',
-      next: { revalidate: 0 },
-    });
-    const json = await response.json();
-    return !!json?.intakeReady;
-  } catch {
-    return false;
-  }
-}
+// 署名付きの /api/status を信頼し、GAS直叩きのフォールバックは行わない
 
 export default async function FormPage() {
   noStore();
@@ -164,9 +146,7 @@ export default async function FormPage() {
   const rawCaseId = status?.caseId ?? status?.activeCaseId ?? null;
   const caseId = typeof rawCaseId === 'string' && rawCaseId.length > 0 ? rawCaseId : null;
   const caseFolderReady = status?.caseFolderReady ?? Boolean(caseId);
-  const intakeReady = caseFolderReady
-    ? status?.intakeReady ?? (await fetchIntakeStatus(lineId, caseId))
-    : false;
+  const intakeReady = caseFolderReady ? Boolean(status?.intakeReady) : false;
   const intakeSubmitted = status?.hasIntake ?? Boolean(caseId);
   const caseReady = Boolean(caseId);
   const intakeFormIdEnv = process.env.NEXT_PUBLIC_INTAKE_FORM_ID;
