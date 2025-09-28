@@ -1,5 +1,4 @@
 // formlist/src/lib/formUrl.ts
-'use server';
 import 'server-only';
 import crypto from 'crypto';
 
