@@ -6,7 +6,9 @@
 
 const STATUS_API_PROPS = PropertiesService.getScriptProperties();
 const STATUS_API_SECRET =
-  STATUS_API_PROPS.getProperty('HMAC_SECRET') || STATUS_API_PROPS.getProperty('BAS_API_HMAC_SECRET') || '';
+  STATUS_API_PROPS.getProperty('HMAC_SECRET') ||
+  STATUS_API_PROPS.getProperty('BAS_API_HMAC_SECRET') ||
+  '';
 const STATUS_API_NONCE_WINDOW_SECONDS = 600; // 10 分
 
 function statusApi_hex_(bytes) {
@@ -19,11 +21,7 @@ function statusApi_hex_(bytes) {
 }
 
 function statusApi_hmac_(message, secret) {
-  const raw = Utilities.computeHmacSignature(
-    Utilities.MacAlgorithm.HMAC_SHA_256,
-    message,
-    secret
-  );
+  const raw = Utilities.computeHmacSignature(Utilities.MacAlgorithm.HMAC_SHA_256, message, secret);
   return statusApi_hex_(raw).toLowerCase();
 }
 
@@ -67,7 +65,9 @@ function statusApi_jsonOut_(obj, status) {
 
 function statusApi_normalizeBool_(v) {
   if (typeof v === 'boolean') return v;
-  const s = String(v || '').trim().toLowerCase();
+  const s = String(v || '')
+    .trim()
+    .toLowerCase();
   return s === 'true' || s === '1' || s === 'yes';
 }
 
@@ -89,7 +89,6 @@ function statusApi_addCamelMirrors_(obj) {
   return out;
 }
 
-
 function statusApi_collectStaging_(lineId, caseId) {
   const lid = String(lineId || '').trim();
   const cid = String(caseId || '').trim();
@@ -109,13 +108,33 @@ function statusApi_collectStaging_(lineId, caseId) {
 
 /** GET /exec?action=status&caseId=&lineId=&ts=&sig= */
 function doGet(e) {
-  const action = String((e && e.parameter && e.parameter.action) || 'status');
+  const p = (e && e.parameter) || {};
+  logCtx_('router:in', {
+    keys: Object.keys(p),
+    action: String(p.action || ''),
+    has_ts: typeof p.ts !== 'undefined',
+    has_sig: typeof p.sig !== 'undefined',
+    has_p: typeof p.p !== 'undefined',
+  });
+  const action = String(p.action || '').trim();
+  // 1) 署名不要の ping は即返す（疎通確認用）
+  if (p.ping === '1') {
+    return statusApi_jsonOut_({ ok: true, via: 'status_api', ping: true }, 200);
+  }
+  // ★ bootstrap は try/catch で包んで JSON エラーに変換
+  if (action === 'bootstrap') {
+    try {
+      return bootstrap_(e);
+    } catch (err) {
+      return statusApi_jsonOut_({ ok: false, error: String(err) }, 400);
+    }
+  }
+  // 3) それ以外（status 等）は従来どおり、最初に署名検証
   try {
-    statusApi_verify_(e.parameter || {});
+    statusApi_verify_(p);
   } catch (err) {
     return statusApi_jsonOut_({ ok: false, error: String(err) }, 400);
   }
-
   try {
     if (action === 'status') {
       const lineId = String((e.parameter || {}).lineId || '').trim();
@@ -126,22 +145,22 @@ function doGet(e) {
       }
       statusApi_collectStaging_(lineId, caseId);
       const forms = getCaseForms_(caseId).map(function (row) {
-  const formKey = String(row.form_key || '').trim();
-  const snake = {
-    case_id: String(row.case_id || row.caseId || caseId || ''),
-    form_key: formKey,
-    status: row.status || '',
-    can_edit: statusApi_normalizeBool_(row.can_edit != null ? row.can_edit : row.canEdit),
-    reopened_at: row.reopened_at || null,
-    locked_reason: row.locked_reason || null,
-    reopen_until: row.reopen_until || null,
-    last_seq: formKey ? getLastSeq_(caseId, formKey) : 0,
-  };
-  const compat = statusApi_addCamelMirrors_(snake);
-  compat.caseId = String(row.caseId || caseId || '');
-  if (!('canEdit' in compat)) compat.canEdit = compat.can_edit;
-  return compat;
-});
+        const formKey = String(row.form_key || '').trim();
+        const snake = {
+          case_id: String(row.case_id || row.caseId || caseId || ''),
+          form_key: formKey,
+          status: row.status || '',
+          can_edit: statusApi_normalizeBool_(row.can_edit != null ? row.can_edit : row.canEdit),
+          reopened_at: row.reopened_at || null,
+          locked_reason: row.locked_reason || null,
+          reopen_until: row.reopen_until || null,
+          last_seq: formKey ? getLastSeq_(caseId, formKey) : 0,
+        };
+        const compat = statusApi_addCamelMirrors_(snake);
+        compat.caseId = String(row.caseId || caseId || '');
+        if (!('canEdit' in compat)) compat.canEdit = compat.can_edit;
+        return compat;
+      });
       return statusApi_jsonOut_({ ok: true, caseId: caseId, forms: forms }, 200);
     }
 

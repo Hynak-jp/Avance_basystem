@@ -8,15 +8,46 @@
  */
 
 /** ---------- 設定 ---------- **/
-const PROP = PropertiesService.getScriptProperties();
+// ★ グローバル PROPS は使わない（重複定義ガード）
+if (typeof props_ !== 'function') {
+  var props_ = function () {
+    return PropertiesService.getScriptProperties();
+  };
+}
+
+if (typeof getSecret_ !== 'function') {
+  var getSecret_ = function () {
+    var s = props_().getProperty('BOOTSTRAP_SECRET') || props_().getProperty('TOKEN_SECRET') || '';
+    if (s && typeof s.replace === 'function') s = s.replace(/[\r\n]+$/g, '');
+    if (!s) throw new Error('missing secret');
+    return s;
+  };
+}
+
+// 追加：タイミング安全な比較
+function safeCompare_(a, b) {
+  a = String(a || '');
+  b = String(b || '');
+  if (a.length !== b.length) return false;
+  var diff = 0;
+  for (var i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+function b64url_(s) {
+  return String(s || '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
 // Avoid global name collision across GAS files: use a file‑scoped alias
-const BS_MASTER_SPREADSHEET_ID = PROP.getProperty('BAS_MASTER_SPREADSHEET_ID'); // BAS_master
+const BS_MASTER_SPREADSHEET_ID = props_().getProperty('BAS_MASTER_SPREADSHEET_ID'); // BAS_master
 // 両対応: DRIVE_ROOT_FOLDER_ID / ROOT_FOLDER_ID
 const DRIVE_ROOT_ID =
-  PROP.getProperty('DRIVE_ROOT_FOLDER_ID') || PROP.getProperty('ROOT_FOLDER_ID'); // BAS_提出書類 ルート
-const BAS_BOOTSTRAP_SECRET = PROP.getProperty('BOOTSTRAP_SECRET') || ''; // 衝突回避のためユニーク名
-const LOG_SHEET_ID = PROP.getProperty('GAS_LOG_SHEET_ID') || ''; // 任意（空で無効）
-const ALLOW_DEBUG = (PROP.getProperty('ALLOW_DEBUG') || '').toLowerCase() === '1'; //
+  props_().getProperty('DRIVE_ROOT_FOLDER_ID') || props_().getProperty('ROOT_FOLDER_ID'); // BAS_提出書類 ルート
+const BAS_BOOTSTRAP_SECRET = props_().getProperty('BOOTSTRAP_SECRET') || ''; // 衝突回避のためユニーク名
+const LOG_SHEET_ID = props_().getProperty('GAS_LOG_SHEET_ID') || ''; // 任意（空で無効）
+const ALLOW_DEBUG = (props_().getProperty('ALLOW_DEBUG') || '').toLowerCase() === '1'; //
 
 const SHEET_CONTACTS = 'contacts';
 const SHEET_CASES = 'cases';
@@ -33,6 +64,188 @@ function bs_caseFolderName_(userKey, rawCaseId) {
   const cid = bs_normCaseId_(rawCaseId);
   if (!cid) return `${userKey}-0000`;
   return `${userKey}-${cid}`;
+}
+
+/** ===== ログユーティリティ（安全に短く） ===== */
+function logCtx_(label, obj) {
+  try {
+    var safe = JSON.parse(
+      JSON.stringify(obj, (k, v) => {
+        if (k === 'sig') return String(v || '').slice(0, 6) + '…' + String(v || '').slice(-6); // 先頭末尾だけ
+        if (k === 'p') return '[payload omitted]';
+        if (k === 'secret' || k === 'token' || k === 'key') return '<redacted>';
+        return v;
+      })
+    );
+    console.info('BAS:' + label + ' ' + JSON.stringify(safe));
+  } catch (_) {
+    console.info('BAS:' + label + ' <unserializable>');
+  }
+}
+
+/** ========= 1) 先頭：共通ユーティリティ（ファイルの上のほうに） ========= */
+function redact_(s, show = 4) {
+  if (!s) return '';
+  const str = String(s);
+  if (str.length <= show * 2) return '*'.repeat(str.length);
+  return str.slice(0, show) + '...' + str.slice(-show);
+}
+function logCtx_(label, obj) {
+  try {
+    const safe = JSON.parse(
+      JSON.stringify(obj, (k, v) => {
+        if (k === 'sig' || k === 'token' || k === 'secret') return redact_(v);
+        if (k === 'p') return '[base64 payload omitted]';
+        return v;
+      })
+    );
+    console.info(`BAS:${label}`, safe);
+  } catch (e) {
+    console.info(`BAS:${label}:<unserializable>`);
+  }
+}
+function normalizeQuery_(obj) {
+  const out = {};
+  for (const [k, v] of Object.entries(obj || {})) {
+    let key = (k || '').toString();
+    key = key.replace(/[A-Z]/g, (m) => '_' + m.toLowerCase()).toLowerCase(); // camel→snake
+    if (key === 'lineid') key = 'line_id';
+    if (key === 'caseid') key = 'case_id';
+    out[key] = v;
+  }
+  return out;
+}
+function makeCanonicalPayload_(line_id, case_id, ts) {
+  return [String(line_id || ''), String(case_id || ''), String(ts || '')].join('|');
+}
+
+// base64url の表記揺れだけ吸収してログするための補助（比較には使わない）
+function __b64peek(s) {
+  s = String(s || '');
+  return {
+    len: s.length,
+    head: s.slice(0, 6),
+    tail: s.slice(-6),
+  };
+}
+
+function verifySigV2_(line_id, case_id, ts, sig) {
+  const payload = makeCanonicalPayload_(line_id, case_id, ts);
+  const secret = getSecret_();
+  const mac = Utilities.computeHmacSha256Signature(payload, secret);
+  const expectedRaw = Utilities.base64EncodeWebSafe(mac);
+  const expected = b64url_(expectedRaw);
+  const provided = b64url_(sig);
+  const ok = safeCompare_(expected, provided);
+  logCtx_('sig:verify', {
+    ok,
+    payload_preview: payload.slice(0, 40) + (payload.length > 40 ? '...' : ''),
+    ts: ts,
+    exp_len: expected.length,
+    got_len: provided.length,
+    exp_head: expected.slice(0, 6),
+    exp_tail: expected.slice(-6),
+    got_head: provided.slice(0, 6),
+    got_tail: provided.slice(-6),
+  });
+  return ok;
+}
+function parseAuth_(q) {
+  if (q && q.p) {
+    const decoded = Utilities.newBlob(Utilities.base64DecodeWebSafe(q.p)).getDataAsString();
+    const parts = decoded.split('|');
+    const li = parts[0] || '';
+    const ci = parts[1] || '';
+    const t = parts[2] || '';
+    const ts = q.ts || t; // フォールバック
+    if (q.ts && t !== q.ts) {
+      logCtx_('sig:ts-mismatch', { q_ts: q.ts, p_ts: t });
+      return { ok: false, line_id: '', case_id: '' };
+    }
+    const ok = verifySigV2_(li, ci, ts, q.sig);
+    logCtx_('sig:p-decoded', {
+      has_p: true,
+      t_len: String(t).length,
+      ts_len: String(ts).length,
+      payload_preview: decoded.slice(0, 40) + (decoded.length > 40 ? '...' : ''),
+    });
+    return { ok, line_id: li, case_id: ci || '' };
+  } else {
+    logCtx_('sig:p-decoded', { has_p: false });
+    return { ok: false, line_id: '', case_id: '' };
+  }
+}
+
+/** ========= 2) 入口関数：bootstrap_ / doGet の最初に差し込む ========= */
+function bootstrap_(e) {
+  // [LOG-1] 入口（生 and 正規化後）
+  logCtx_('bootstrap:raw', { query: e && e.parameter });
+  const q = normalizeQuery_(e && e.parameter);
+  logCtx_('bootstrap:norm', {
+    keys: Object.keys(q),
+    has_p: !!q.p,
+    ts_len: String(q.ts || '').length,
+    sig_len: String(q.sig || '').length,
+    line_id: !!q.line_id,
+    case_id: !!q.case_id,
+  });
+
+  // C. p を使っているなら “中身の形” だけ観測
+  try {
+    if (q.p) {
+      var decoded = Utilities.newBlob(Utilities.base64DecodeWebSafe(q.p)).getDataAsString();
+      var parts = decoded.split('|');
+      var t = parts[2] || '';
+      logCtx_('sig:p-decoded', {
+        has_p: true,
+        parts_len: parts.length,
+        t_len: String(t).length,
+        payload_preview: decoded.slice(0, 40) + (decoded.length > 40 ? '…' : ''),
+      });
+    } else {
+      logCtx_('sig:p-decoded', { has_p: false });
+    }
+  } catch (err) {
+    logCtx_('sig:p-decode-error', { error: String(err) });
+  }
+
+  // [LOG-2] 署名検証（p有無どちらでも観測）
+  const auth = parseAuth_(q);
+  logCtx_('bootstrap:auth', {
+    ok: auth.ok,
+    li_present: !!auth.line_id,
+    ci_present: !!auth.case_id,
+  });
+  if (!auth.ok) {
+    console.error('BAS:auth:failed');
+    return ContentService.createTextOutput(
+      JSON.stringify({ ok: false, error: 'invalid sig' })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // 以降は既存の処理にログを添える（関数名はあなたの実装に合わせて）
+  // [LOG-3] contacts upsert の直前/直後
+  logCtx_('contacts:upsert:begin', { line_id: redact_(auth.line_id) });
+  const contact = upsertContact_(auth.line_id); // ←あなたの実装を呼ぶ
+  logCtx_('contacts:upsert:done', {
+    user_key: contact.user_key,
+    have_active_case: !!contact.active_case_id,
+  });
+
+  // [LOG-4] case 確保（採番/既存紐付け）
+  const c = ensureCaseForContact_(auth.line_id, contact); // ←あなたの実装を呼ぶ
+  logCtx_('cases:ensure:done', {
+    case_id: c.case_id,
+    case_key: c.case_key,
+    has_folder: !!c.folder_id,
+  });
+
+  // [LOG-5] レスポンス直前（フロントが見るフラグも）
+  const resp = { ok: true, case_id: c.case_id, caseFolderReady: !!c.folder_id };
+  logCtx_('bootstrap:resp', resp);
+  return ContentService.createTextOutput(JSON.stringify(resp)).setMimeType(
+    ContentService.MimeType.JSON
+  );
 }
 
 /** ---------- ユーティリティ ---------- **/
@@ -424,7 +637,6 @@ function bs_ensureCaseFolder_(userKey, caseId) {
   return root.createFolder(title).getId();
 }
 
-
 /**
  * cases シートからフォルダ ID を取得（フォルダ新規作成はしない）
  */
@@ -556,11 +768,17 @@ function bs_collectIntakeFromStaging_(lineId, caseId) {
               try {
                 var text = '';
                 var data = null;
-                try { text = file.getBlob().getDataAsString('utf-8'); } catch (_e) {}
-                try { data = JSON.parse(text); } catch (_e2) {}
+                try {
+                  text = file.getBlob().getDataAsString('utf-8');
+                } catch (_e) {}
+                try {
+                  data = JSON.parse(text);
+                } catch (_e2) {}
                 var sid = '';
                 if (data && typeof data === 'object') {
-                  sid = String((data.submission_id) || (data.meta && data.meta.submission_id) || '').trim();
+                  sid = String(
+                    data.submission_id || (data.meta && data.meta.submission_id) || ''
+                  ).trim();
                 }
                 if (typeof recordSubmission_ === 'function') {
                   recordSubmission_({
@@ -568,11 +786,24 @@ function bs_collectIntakeFromStaging_(lineId, caseId) {
                     form_key: 'intake',
                     submission_id: sid,
                     json_path: file.getName(),
-                    meta: (data && data.meta) ? data.meta : { case_id: normalizedCaseId, line_id: lineId }
+                    meta:
+                      data && data.meta
+                        ? data.meta
+                        : { case_id: normalizedCaseId, line_id: lineId },
                   });
                 }
+                if (typeof bs_setCaseStatus_ === 'function') {
+                  try {
+                    bs_setCaseStatus_(normalizedCaseId, 'intake');
+                  } catch (_) {}
+                }
               } catch (e3) {
-                try { Logger.log('[bs_collectIntakeFromStaging_] recordSubmission error: %s', (e3 && e3.stack) || e3); } catch (_) {}
+                try {
+                  Logger.log(
+                    '[bs_collectIntakeFromStaging_] recordSubmission error: %s',
+                    (e3 && e3.stack) || e3
+                  );
+                } catch (_) {}
               }
             } catch (err) {
               try {
@@ -608,7 +839,11 @@ function handleStatus_(lineId, caseId, hasIntake, userKey) {
   const caseFolderReady = Boolean(folderId);
   if (!caseFolderReady) {
     try {
-      Logger.log('[handleStatus_] no folderId yet, userKey=%s caseId=%s', userKey || '', normalizedCaseId);
+      Logger.log(
+        '[handleStatus_] no folderId yet, userKey=%s caseId=%s',
+        userKey || '',
+        normalizedCaseId
+      );
     } catch (_) {}
   }
   let intakeReady = folderId ? bs_isIntakeJsonReady_(folderId) : false;

@@ -1,11 +1,20 @@
 /********** 設定 **********/
 // Script Properties を最優先に使用（DRIVE_ROOT_FOLDER_ID → ROOT_FOLDER_ID の順）
-const PROPS = PropertiesService.getScriptProperties();
+
+function getSecret_() {
+  // 両方試す：BOOTSTRAP_SECRET 優先、なければ TOKEN_SECRET
+  let s = props_().getProperty('BOOTSTRAP_SECRET') || props_().getProperty('TOKEN_SECRET') || '';
+  if (s && typeof s.replace === 'function') s = s.replace(/[\r\n]+$/g, '');
+  if (!s) throw new Error('missing secret');
+  return s;
+}
+
 const ROOT_FOLDER_ID = (function () {
-  const id = PROPS.getProperty('DRIVE_ROOT_FOLDER_ID') || PROPS.getProperty('ROOT_FOLDER_ID');
+  const id = props_().getProperty('DRIVE_ROOT_FOLDER_ID') || props_().getProperty('ROOT_FOLDER_ID');
   if (!id) throw new Error('DRIVE_ROOT_FOLDER_ID/ROOT_FOLDER_ID is not configured');
   return id;
 })();
+
 const SHEET_ID = ''; // 既存の台帳シートを使うならIDを入れる。空なら後で自動生成可能
 const LABEL_TO_PROCESS = 'FormAttach/ToProcess';
 const LABEL_PROCESSED = 'FormAttach/Processed';
@@ -18,10 +27,10 @@ const ASIA_TOKYO = 'Asia/Tokyo';
 
 // Script Properties 推奨（プロパティ未設定ならトンネル直URLを既定）
 const BASE = (
-  PROPS.getProperty('NEXT_BASE_URL') || 'https://depot-heath-television-ga.trycloudflare.com'
+  props_().getProperty('NEXT_BASE_URL') || 'https://depot-heath-television-ga.trycloudflare.com'
 ).replace(/\/+$/, '');
 const NEXT_API_URL = `${BASE}/api/extract`;
-const SECRET = PROPS.getProperty('SECRET') || 'FM-BAS';
+const SECRET = props_().getProperty('SECRET') || 'FM-BAS';
 const ENABLE_FORM_LOG_SHORTCUTS = false; // ← ショートカット不要なら false
 
 /** 書類種別：フォルダは日本語(type)、ファイルは英数字コード(code) */
@@ -989,7 +998,7 @@ function checkNotificationGuard_(msg, meta) {
 
   // 期待シークレット：プロパティ優先、無ければ定数
   const expectedSecretRaw =
-    (PROPS && (PROPS.getProperty('NOTIFY_SECRET') || PROPS.getProperty('SECRET'))) ||
+    (props_() && (props_().getProperty('NOTIFY_SECRET') || props_().getProperty('SECRET'))) ||
     (typeof NOTIFY_SECRET !== 'undefined' ? NOTIFY_SECRET : '') ||
     '';
   const expected = _normToken(expectedSecretRaw);
@@ -1268,11 +1277,9 @@ function processLabel(labelName) {
     // すでに処理済み/エラーのラベルが付いていたら ToProcess を外してスキップ
     const labs = thread.getLabels().map((l) => l.getName());
     const queueLabels = typeof getFormQueueLabels_ === 'function' ? getFormQueueLabels_() : [];
-    const lockLabelName = typeof getFormLockLabel_ === 'function' ? getFormLockLabel_() : 'BAS/lock';
-    if (
-      queueLabels.some((name) => labs.indexOf(name) >= 0) ||
-      labs.indexOf(lockLabelName) >= 0
-    ) {
+    const lockLabelName =
+      typeof getFormLockLabel_ === 'function' ? getFormLockLabel_() : 'BAS/lock';
+    if (queueLabels.some((name) => labs.indexOf(name) >= 0) || labs.indexOf(lockLabelName) >= 0) {
       return;
     }
     if (labs.indexOf(LABEL_PROCESSED) >= 0 || labs.indexOf(LABEL_ERROR) >= 0) {
@@ -1601,11 +1608,20 @@ function upsertContact_(ss, lineId, displayName) {
   const sh = ss.getSheetByName('contacts') || ss.insertSheet('contacts');
   // 新規は snake_case で初期化
   if (sh.getLastRow() === 0) {
-    sh.appendRow(['line_id','display_name','user_key','root_folder_id','next_case_seq','active_case_id']);
+    sh.appendRow([
+      'line_id',
+      'display_name',
+      'user_key',
+      'root_folder_id',
+      'next_case_seq',
+      'active_case_id',
+    ]);
   }
-  const header = sh.getRange(1,1,1,Math.max(1,sh.getLastColumn())).getValues()[0].map(String);
-  let idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
-    : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+  const header = sh.getRange(1, 1, 1, Math.max(1, sh.getLastColumn())).getValues()[0].map(String);
+  let idxMap =
+    typeof buildHeaderIndexMap_ === 'function'
+      ? buildHeaderIndexMap_(header)
+      : header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
 
   const HEADERS = {};
   HEADERS[K.lineId] = 'line_id';
@@ -1617,21 +1633,26 @@ function upsertContact_(ss, lineId, displayName) {
   Object.keys(HEADERS).forEach((canon) => {
     if (idxMap[canon] === undefined) {
       const col = sh.getLastColumn() + 1;
-      sh.getRange(1,col).setValue(HEADERS[canon]);
+      sh.getRange(1, col).setValue(HEADERS[canon]);
       header.push(HEADERS[canon]);
-      idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
-        : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+      idxMap =
+        typeof buildHeaderIndexMap_ === 'function'
+          ? buildHeaderIndexMap_(header)
+          : header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
     }
   });
 
   const rowCount = sh.getLastRow() - 1;
   const lastCol = sh.getLastColumn();
-  const values = rowCount>0 ? sh.getRange(2,1,rowCount,lastCol).getValues() : [];
+  const values = rowCount > 0 ? sh.getRange(2, 1, rowCount, lastCol).getValues() : [];
 
   let targetRow = -1; // 1-based
   const colLine0 = idxMap[K.lineId];
-  for (let i=0;i<values.length;i++){
-    if (String(values[i][colLine0]||'') === String(lineId)) { targetRow = i+2; break; }
+  for (let i = 0; i < values.length; i++) {
+    if (String(values[i][colLine0] || '') === String(lineId)) {
+      targetRow = i + 2;
+      break;
+    }
   }
 
   const userKey = makeUserKey_(lineId);
@@ -1645,9 +1666,16 @@ function upsertContact_(ss, lineId, displayName) {
     setCellByKey_(sh, targetRow, idxMap, K.rootFolderId, root.getId());
     setCellByKey_(sh, targetRow, idxMap, K.nextCaseSeq, 0);
     setCellByKey_(sh, targetRow, idxMap, K.activeCaseId, '');
-    return { lineId, displayName, userKey, rootFolderId: root.getId(), nextCaseSeq: 0, activeCaseId: '' };
+    return {
+      lineId,
+      displayName,
+      userKey,
+      rootFolderId: root.getId(),
+      nextCaseSeq: 0,
+      activeCaseId: '',
+    };
   } else {
-    const rowVals = sh.getRange(targetRow,1,1,lastCol).getValues()[0];
+    const rowVals = sh.getRange(targetRow, 1, 1, lastCol).getValues()[0];
     const currentUserKey = String(getCellByKey_(rowVals, idxMap, K.userKey) || '') || userKey;
     let rootId = String(getCellByKey_(rowVals, idxMap, K.rootFolderId) || '');
     if (!rootId) rootId = ensureUserRootFolder_(displayName, currentUserKey).getId();
@@ -1670,33 +1698,37 @@ function upsertContact_(ss, lineId, displayName) {
 function allocateNextCaseId_(lineId) {
   const ss = openOrCreateMaster_();
   const sh = ss.getSheetByName('contacts');
-  const header = sh.getRange(1,1,1,Math.max(1,sh.getLastColumn())).getValues()[0].map(String);
-  let idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
-    : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+  const header = sh.getRange(1, 1, 1, Math.max(1, sh.getLastColumn())).getValues()[0].map(String);
+  let idxMap =
+    typeof buildHeaderIndexMap_ === 'function'
+      ? buildHeaderIndexMap_(header)
+      : header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
   const ensureKey = (canon, headerName) => {
     if (idxMap[canon] === undefined) {
-      const col = sh.getLastColumn()+1;
-      sh.getRange(1,col).setValue(headerName);
+      const col = sh.getLastColumn() + 1;
+      sh.getRange(1, col).setValue(headerName);
       header.push(headerName);
-      idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
-        : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+      idxMap =
+        typeof buildHeaderIndexMap_ === 'function'
+          ? buildHeaderIndexMap_(header)
+          : header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
     }
   };
   ensureKey(K.lineId, 'line_id');
   ensureKey(K.nextCaseSeq, 'next_case_seq');
 
-  const rowCount = sh.getLastRow()-1;
+  const rowCount = sh.getLastRow() - 1;
   const lastCol = sh.getLastColumn();
-  const rows = rowCount>0 ? sh.getRange(2,1,rowCount,lastCol).getValues() : [];
+  const rows = rowCount > 0 ? sh.getRange(2, 1, rowCount, lastCol).getValues() : [];
   const colLine0 = idxMap[K.lineId];
   const colNext0 = idxMap[K.nextCaseSeq];
-  for (let i=0;i<rows.length;i++){
-    if (String(rows[i][colLine0]||'') === String(lineId)) {
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][colLine0] || '') === String(lineId)) {
       let cur = parseInt(rows[i][colNext0] || 0, 10);
       if (!isFinite(cur)) cur = 0;
       const next = cur + 1;
-      const padded = String(next).padStart(4,'0');
-      sh.getRange(i+2, colNext0+1).setValue(next);
+      const padded = String(next).padStart(4, '0');
+      sh.getRange(i + 2, colNext0 + 1).setValue(next);
       return padded;
     }
   }
@@ -1706,27 +1738,37 @@ function allocateNextCaseId_(lineId) {
 function setActiveCaseId_(ss, lineId, caseId) {
   const sh = ss.getSheetByName('contacts');
   if (!sh) return;
-  const header = sh.getRange(1,1,1,Math.max(1,sh.getLastColumn())).getValues()[0].map(String);
-  let idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
-    : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+  const header = sh.getRange(1, 1, 1, Math.max(1, sh.getLastColumn())).getValues()[0].map(String);
+  let idxMap =
+    typeof buildHeaderIndexMap_ === 'function'
+      ? buildHeaderIndexMap_(header)
+      : header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
   if (idxMap[K.lineId] === undefined) {
-    const col = sh.getLastColumn()+1; sh.getRange(1,col).setValue('line_id'); header.push('line_id');
-    idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
-      : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+    const col = sh.getLastColumn() + 1;
+    sh.getRange(1, col).setValue('line_id');
+    header.push('line_id');
+    idxMap =
+      typeof buildHeaderIndexMap_ === 'function'
+        ? buildHeaderIndexMap_(header)
+        : header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
   }
   if (idxMap[K.activeCaseId] === undefined) {
-    const col = sh.getLastColumn()+1; sh.getRange(1,col).setValue('active_case_id'); header.push('active_case_id');
-    idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
-      : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+    const col = sh.getLastColumn() + 1;
+    sh.getRange(1, col).setValue('active_case_id');
+    header.push('active_case_id');
+    idxMap =
+      typeof buildHeaderIndexMap_ === 'function'
+        ? buildHeaderIndexMap_(header)
+        : header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
   }
-  const rowCount = sh.getLastRow()-1;
+  const rowCount = sh.getLastRow() - 1;
   if (rowCount < 1) return;
   const lastCol = sh.getLastColumn();
-  const rows = sh.getRange(2,1,rowCount,lastCol).getValues();
+  const rows = sh.getRange(2, 1, rowCount, lastCol).getValues();
   const colLine0 = idxMap[K.lineId];
-  for (let i=0;i<rows.length;i++){
-    if (String(rows[i][colLine0]||'') === String(lineId)) {
-      setCellByKey_(sh, i+2, idxMap, K.activeCaseId, caseId);
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][colLine0] || '') === String(lineId)) {
+      setCellByKey_(sh, i + 2, idxMap, K.activeCaseId, caseId);
       return;
     }
   }
@@ -1736,11 +1778,13 @@ function casesAppend_(lineId, caseId) {
   const ss = openOrCreateMaster_();
   const sh = ss.getSheetByName('cases') || ss.insertSheet('cases');
   if (sh.getLastRow() === 0) {
-    sh.appendRow(['line_id','case_id','created_at','status','last_activity']);
+    sh.appendRow(['line_id', 'case_id', 'created_at', 'status', 'last_activity']);
   }
-  const header = sh.getRange(1,1,1,Math.max(1,sh.getLastColumn())).getValues()[0].map(String);
-  const idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
-    : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+  const header = sh.getRange(1, 1, 1, Math.max(1, sh.getLastColumn())).getValues()[0].map(String);
+  const idxMap =
+    typeof buildHeaderIndexMap_ === 'function'
+      ? buildHeaderIndexMap_(header)
+      : header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
   sh.appendRow(new Array(sh.getLastColumn()).fill(''));
   const row1 = sh.getLastRow();
   const now = new Date();
@@ -1756,17 +1800,19 @@ function resolveCaseId_(mailPlainBody, subject, lineId) {
   if (meta.case_id) return String(meta.case_id).trim();
   const ss = openOrCreateMaster_();
   const sh = ss.getSheetByName('contacts');
-  const header = sh.getRange(1,1,1,Math.max(1,sh.getLastColumn())).getValues()[0].map(String);
-  const idxMap = (typeof buildHeaderIndexMap_==='function') ? buildHeaderIndexMap_(header)
-    : header.reduce((m,v,i)=>((m[String(v)]=i),m),{});
+  const header = sh.getRange(1, 1, 1, Math.max(1, sh.getLastColumn())).getValues()[0].map(String);
+  const idxMap =
+    typeof buildHeaderIndexMap_ === 'function'
+      ? buildHeaderIndexMap_(header)
+      : header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
   const rowCount = sh.getLastRow() - 1;
   if (rowCount < 1) return '';
-  const rows = sh.getRange(2,1,rowCount,sh.getLastColumn()).getValues();
+  const rows = sh.getRange(2, 1, rowCount, sh.getLastColumn()).getValues();
   const colLine0 = idxMap[K.lineId];
   const colActive0 = idxMap[K.activeCaseId];
   if (colLine0 === undefined || colActive0 === undefined) return '';
-  for (let i=0;i<rows.length;i++){
-    if (String(rows[i][colLine0]||'') === String(lineId)) {
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][colLine0] || '') === String(lineId)) {
       return String(rows[i][colActive0] || '');
     }
   }

@@ -360,7 +360,6 @@ function debug_readModelJson_prompt() {
 /*環境の健全性チェック（プロパティ＆フォルダ＆スプレッドシート）*/
 function diag_checkEnv() {
   try {
-    const props = PropertiesService.getScriptProperties();
     const sid = props.getProperty('BAS_MASTER_SPREADSHEET_ID');
     const did = props.getProperty('DRIVE_ROOT_FOLDER_ID') || ROOT_FOLDER_ID;
 

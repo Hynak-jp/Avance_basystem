@@ -795,7 +795,6 @@ function ensureCaseFolderId_(caseInfo) {
   }
 
   // 2) caseKey から Drive ルート直下で検索/作成
-  const props = PropertiesService.getScriptProperties();
   const ROOT_ID =
     props.getProperty('DRIVE_ROOT_FOLDER_ID') || props.getProperty('ROOT_FOLDER_ID') || '';
   if (!ROOT_ID) throw new Error('ROOT_FOLDER_ID/DRIVE_ROOT_FOLDER_ID が未設定です');
@@ -843,7 +842,6 @@ function extractDriveIdMaybe_(v) {
  */
 function findBestCaseFolderUnderRoot_(name, preferId) {
   if (!name) return null;
-  const props = PropertiesService.getScriptProperties();
   const ROOT_ID =
     props.getProperty('DRIVE_ROOT_FOLDER_ID') || props.getProperty('ROOT_FOLDER_ID') || '';
   if (!ROOT_ID) return null;

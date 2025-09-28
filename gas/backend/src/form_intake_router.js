@@ -238,6 +238,44 @@ function run_ProcessInbox_AllForms() {
           return;
         }
 
+        // ===== intake はケース採番・保存の前に、まず staging へ保存して終了（重複採番防止） =====
+        const formKeyForStatusEarly = String(meta.form_key || actualKey || '').trim();
+        if (formKeyForStatusEarly === 'intake') {
+          try {
+            const P = PropertiesService.getScriptProperties();
+            const EXPECT = String(P.getProperty('NOTIFY_SECRET') || '').trim();
+            const ALLOW_NO_SECRET = (P.getProperty('ALLOW_NO_SECRET') || '').toLowerCase() === '1';
+            const provided = String((meta && meta.secret) || '').trim();
+            if (EXPECT && !ALLOW_NO_SECRET && provided !== EXPECT) {
+              try { Logger.log('[Intake] secret mismatch (early): meta.secret=%s', provided || '(empty)'); } catch (_) {}
+              formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, false);
+              return;
+            }
+          } catch (_) {}
+
+          if (!meta.submission_id) {
+            meta.submission_id =
+              meta.submissionId ||
+              (typeof Utilities !== 'undefined' && typeof Utilities.getUuid === 'function'
+                ? Utilities.getUuid()
+                : String(Date.now()));
+            if (!meta.submissionId) meta.submissionId = meta.submission_id;
+            parsed.meta = meta;
+          }
+
+          const P = PropertiesService.getScriptProperties();
+          const ROOT_ID = P.getProperty('DRIVE_ROOT_FOLDER_ID') || P.getProperty('ROOT_FOLDER_ID');
+          const root = DriveApp.getFolderById(ROOT_ID);
+          const itSt = root.getFoldersByName('_email_staging');
+          const staging = itSt.hasNext() ? itSt.next() : root.createFolder('_email_staging');
+          const fname = `intake__${meta.submission_id}.json`;
+          const blob = Utilities.newBlob(JSON.stringify(parsed, null, 2), 'application/json', fname);
+          staging.createFile(blob);
+          try { Logger.log('[Intake] early staged %s', fname); } catch (_) {}
+          formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, true);
+          return;
+        }
+
         const prepared = formIntake_prepareCaseInfo_(meta, def, parsed);
         const caseInfo = prepared.caseInfo || {};
         const caseId = prepared.caseId;

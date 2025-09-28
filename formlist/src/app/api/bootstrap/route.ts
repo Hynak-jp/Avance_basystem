@@ -1,16 +1,26 @@
 // formlist/src/app/api/bootstrap/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { createHmac } from 'crypto';
+import crypto from 'crypto';
 
 // Node の crypto を使うので念のため Node ランタイムを明示
 export const runtime = 'nodejs';
 
-const GAS_ENDPOINT = process.env.GAS_ENDPOINT;
-const SECRET = process.env.BOOTSTRAP_SECRET;
+const GAS_ENDPOINT = process.env.GAS_ENDPOINT!;
+const SECRET = process.env.BOOTSTRAP_SECRET ?? process.env.TOKEN_SECRET;
 
-function hmacBase64Url(secret: string, lineId: string, ts: number) {
-  const base = `${lineId}|${ts}`; // ★ 署名対象は lineId|ts
-  return createHmac('sha256', secret).update(base, 'utf8').digest('base64url'); // ★ URL-safe
+function makePayload(lineId: string, caseId: string | undefined, tsMs: string) {
+  return [lineId, caseId ?? '', tsMs].join('|');
+}
+function toB64Url(b64: string) {
+  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function hmacB64url(secret: string, s: string) {
+  // Node の digest('base64url') が使えない環境でも動くフォールバック
+  const b64 = crypto.createHmac('sha256', secret).update(s, 'utf8').digest('base64');
+  return toB64Url(b64);
+}
+function b64urlFromString(s: string) {
+  return toB64Url(Buffer.from(s, 'utf8').toString('base64'));
 }
 
 export async function POST(req: NextRequest) {
@@ -26,33 +36,43 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { lineId, displayName = '', email = '' } = await req.json();
+    // intake（初回受付）から呼ばれる前提
+    const { lineId, caseId } = await req.json();
     if (!lineId) return NextResponse.json({ ok: false, error: 'missing_lineId' }, { status: 400 });
 
-    const ts = Math.floor(Date.now() / 1000); // UNIX秒
-    const userKey = String(lineId).slice(0, 6).toLowerCase();
+    // ts はミリ秒（文字列）
+    const ts = Date.now().toString();
+    // payload = lineId|caseId|ts（初回は caseId を空でOK）
+    const payload = makePayload(lineId, caseId, ts);
+    const sig = hmacB64url(SECRET!, payload);
+    const p = b64urlFromString(payload);
 
-    // 送信する本文（署名対象ではない）
-    const payload = { userKey, lineId, displayName, email, ts };
-    const body = JSON.stringify(payload);
-
-    // ★ Base64URL 署名を作成
-    const sig = hmacBase64Url(SECRET!, lineId, ts);
-
-    // ★ URL に sig, ts を付与（必要なら debug=1 を伝搬）
-    const url = new URL(GAS_ENDPOINT!);
+    // GET /exec?action=bootstrap に統一
+    const url = new URL(GAS_ENDPOINT);
+    url.searchParams.set('action', 'bootstrap');
+    url.searchParams.set('ts', ts);
     url.searchParams.set('sig', sig);
-    url.searchParams.set('ts', String(ts));
-    // 両対応（qs/bodyどちらでも取得できる）に寄せるため冪等的に付与
-    url.searchParams.set('lineId', lineId);
-    url.searchParams.set('userKey', userKey);
-    const wantDebug = req.nextUrl.searchParams.get('debug') === '1';
-    if (wantDebug) url.searchParams.set('debug', '1');
+    url.searchParams.set('p', p);
+
+    // デバッグ用の軽いログ（指紋のみ）
+    try {
+      // biome-ignore lint/suspicious/noConsole: intentional runtime log
+      console.log('BAS:formlist:auth', {
+        lineId_present: !!lineId,
+        caseId_present: !!caseId,
+        ts_len: ts.length,
+        sig_len: sig.length,
+        secret_fp: crypto
+          .createHmac('sha256', SECRET!)
+          .update('fingerprint')
+          .digest('base64url')
+          .slice(0, 12),
+      });
+    } catch {}
 
     const r = await fetch(url.toString(), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'cache-control': 'no-store' },
-      body,
+      method: 'GET',
+      headers: { 'cache-control': 'no-store' },
       cache: 'no-store',
     });
 
