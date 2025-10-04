@@ -4,7 +4,7 @@
  *  - 署名対象: lineId + '|' + ts（UNIX秒）
  *  - アルゴリズム: HMAC-SHA256 → Base64URL
  *  - ts: UNIX秒 / 許容スキュー ±300秒 / 本文の ts とクエリ ts を整合確認
- *  - 処理: contacts upsert → caseId 採番（ロック）→ Drive フォルダ作成 → cases/contacts 更新
+ *  - 処理: contacts upsert のみ（caseId 採番／ケースフォルダ作成は intake_complete 側で実施）
  */
 
 /** ---------- 設定 ---------- **/
@@ -81,6 +81,44 @@ function redact_(s, show = 4) {
   if (str.length <= show * 2) return '*'.repeat(str.length);
   return str.slice(0, show) + '...' + str.slice(-show);
 }
+
+/** ===== 共通マッチャー（必要なら定義）: case_key → case_id → line_id ===== */
+if (typeof normCaseId_ !== 'function') {
+  function normCaseId_(s) {
+    s = String(s || '').trim();
+    var n = s.replace(/^0+/, '');
+    if (!n) return '';
+    var num = parseInt(n, 10);
+    if (!isFinite(num)) return '';
+    return Utilities.formatString('%04d', num);
+  }
+}
+if (typeof normCaseKey_ !== 'function') {
+  function normCaseKey_(s) {
+    s = String(s || '').trim().toLowerCase();
+    var m = s.match(/^([a-z0-9]{2,})-(\d{1,})$/);
+    if (!m) return s;
+    return m[1] + '-' + normCaseId_(m[2]);
+  }
+}
+if (typeof normLineId_ !== 'function') {
+  function normLineId_(s) { return String(s || '').trim(); }
+}
+if (typeof matchMetaToCase_ !== 'function') {
+  function matchMetaToCase_(fileMeta, known) {
+    var fm = fileMeta || {};
+    var fk = normCaseKey_(fm.case_key || fm.caseKey || '');
+    var fid = normCaseId_(fm.case_id || fm.caseId || '');
+    var fl = normLineId_(fm.line_id || fm.lineId || '');
+    var kk = normCaseKey_(known && known.case_key || '');
+    var kid = normCaseId_(known && known.case_id || '');
+    var kl = normLineId_(known && known.line_id || '');
+    if (fk && kk && fk === kk) return { ok: true, by: 'case_key' };
+    if (fid && kid && fid === kid) return { ok: true, by: 'case_id' };
+    if (fl && kl && fl === kl) return { ok: true, by: 'line_id' };
+    return { ok: false, by: '' };
+  }
+}
 function logCtx_(label, obj) {
   try {
     const safe = JSON.parse(
@@ -154,6 +192,13 @@ function parseAuth_(q) {
       return { ok: false, line_id: '', case_id: '' };
     }
     const ok = verifySigV2_(li, ci, ts, q.sig);
+    // 追加: 時刻スキュー検証（±600秒）
+    const nowSec = Math.floor(Date.now() / 1000);
+    const tsNum = Number(ts);
+    if (!Number.isFinite(tsNum) || Math.abs(tsNum - nowSec) > 600) {
+      logCtx_('sig:ts-skew', { now: nowSec, ts: tsNum, diff: tsNum - nowSec });
+      return { ok: false, line_id: '', case_id: '' };
+    }
     logCtx_('sig:p-decoded', {
       has_p: true,
       t_len: String(t).length,
@@ -215,21 +260,13 @@ function bootstrap_(e) {
   const up = bs_upsertContact_({ userKey, lineId, displayName: '', email: '' });
   logCtx_('contacts:upsert:done', { row: up.row, userKey });
 
-  // [LOG-5] caseId 確保（既存が無ければ採番）
+  // [LOG-5] caseId 読み出しのみ（既存が無ければ空のまま）
   const sh = bs_getSheet_(SHEET_CONTACTS);
   const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
   const idx = bs_toIndexMap_(headers);
   const rowVals = sh.getRange(up.row, 1, 1, headers.length).getValues()[0];
   const activeIdx = typeof idx['active_case_id'] === 'number' ? idx['active_case_id'] : idx['activeCaseId'];
-  let caseId = activeIdx >= 0 ? bs_normCaseId_(rowVals[activeIdx] || '') : '';
-  if (!caseId) {
-    const issued = bs_issueCaseId_(userKey, lineId);
-    caseId = bs_normCaseId_(issued.caseId);
-    if (activeIdx >= 0) sh.getRange(up.row, activeIdx + 1).setValue(caseId);
-  } else {
-    // 既存 caseId の場合でも、cases 行が無ければ作っておく
-    try { bs_ensureCaseRow_(caseId, userKey, lineId); } catch (_) {}
-  }
+  const caseId = activeIdx >= 0 ? bs_normCaseId_(rowVals[activeIdx] || '') : '';
 
   // [LOG-6] ケースフォルダは intake 完了時にのみ作成する（ここでは作らない）
   const resp = { ok: true, case_id: caseId, caseFolderReady: false };
@@ -715,7 +752,7 @@ function bs_isIntakeJsonReady_(caseFolderId) {
   return false;
 }
 
-function resolveCaseFolderId_(lineId, caseId) {
+function resolveCaseFolderId_(lineId, caseId, createIfMissing /* = false */) {
   const direct = bs_resolveCaseFolderId_('', caseId, lineId);
   if (direct) return direct;
 
@@ -723,24 +760,29 @@ function resolveCaseFolderId_(lineId, caseId) {
   if (userKey) {
     const viaUser = bs_resolveCaseFolderId_(userKey, caseId, lineId);
     if (viaUser) return viaUser;
-    try {
-      const ensuredId = bs_ensureCaseFolder_(userKey, caseId);
-      if (ensuredId) return ensuredId;
-    } catch (err) {
+    if (createIfMissing) {
       try {
-        Logger.log('[resolveCaseFolderId_] ensure error: %s', (err && err.stack) || err);
-      } catch (_) {}
+        const ensuredId = bs_ensureCaseFolder_(userKey, caseId);
+        if (ensuredId) return ensuredId;
+      } catch (err) {
+        try {
+          Logger.log('[resolveCaseFolderId_] ensure error: %s', (err && err.stack) || err);
+        } catch (_) {}
+      }
     }
   }
 
   return '';
 }
 
-function bs_collectIntakeFromStaging_(lineId, caseId) {
+function bs_collectIntakeFromStaging_(lineId, caseId, knownFolderId /* optional */) {
   const normalizedCaseId = bs_normCaseId_(caseId);
   if (!lineId || !normalizedCaseId) return;
 
-  let caseFolderId = resolveCaseFolderId_(lineId, normalizedCaseId);
+  let caseFolderId = knownFolderId || '';
+  if (!caseFolderId) {
+    caseFolderId = resolveCaseFolderId_(lineId, normalizedCaseId, /*createIfMissing=*/false);
+  }
   if (!caseFolderId) return;
 
   let caseFolder;
@@ -753,8 +795,14 @@ function bs_collectIntakeFromStaging_(lineId, caseId) {
     return;
   }
 
+  // submissions 追記の件数（診断用）
+  var appended = 0;
+  var moved = 0;
+  var lastSavedName = '';
+
   try {
     const root = DriveApp.getFolderById(DRIVE_ROOT_ID);
+    try { logCtx_('collectStaging', { lineId, caseId: normalizedCaseId, folderId: caseFolderId }); } catch (_) {}
     ['_staging', '_email_staging'].forEach(function (name) {
       const iter = root.getFoldersByName(name);
       if (!iter.hasNext()) return;
@@ -777,16 +825,60 @@ function bs_collectIntakeFromStaging_(lineId, caseId) {
           const name = file.getName ? file.getName() : '';
           if (/^intake__/i.test(name)) {
             try {
-              caseFolder.addFile(file);
-              const parents = file.getParents();
-              while (parents.hasNext()) {
-                const parent = parents.next();
-                if (parent.getId && parent.getId() !== caseFolderId) {
-                  try {
-                    parent.removeFile(file);
-                  } catch (_) {}
-                }
-              }
+              // フィルタ: case_key → case_id → line_id の順で一致判定
+              var text0 = '';
+              var data0 = null;
+              try { text0 = file.getBlob().getDataAsString('utf-8'); } catch (_) {}
+              try { data0 = JSON.parse(text0); } catch (_) {}
+              var ukey0 = drive_userKeyFromLineId_(lineId);
+              var cid0 = normalizedCaseId;
+              var ckey0 = (ukey0 ? (ukey0 + '-') : '') + cid0; // uk 不明時は "-0001" を作らない
+              var meta0 = (data0 && data0.meta) || {};
+              var known0 = { case_key: (ukey0 ? (ukey0 + '-' + cid0) : ''), case_id: cid0, line_id: String(lineId) };
+              var res0 = (typeof matchMetaToCase_ === 'function') ? matchMetaToCase_(meta0, known0) : { ok: false };
+              var matched0 = !!(res0 && res0.ok);
+              // 採用条件: 一致済み or (メタが空 かつ 直近15分内)
+              var updatedAt = +(file.getLastUpdated && file.getLastUpdated());
+              var recent = Number.isFinite(updatedAt) ? (Date.now() - updatedAt <= 15 * 60 * 1000) : false;
+              var noMeta = !(fileCKey0 || fileCID0 || fileLID0);
+              if (!(matched0 || (noMeta && recent))) continue;
+
+              // 一致した場合のみ、内容を meta 補完して「書き直し」で案件直下へ保存
+              try {
+                var raw = '';
+                try { raw = file.getBlob().getDataAsString('utf-8'); } catch (_) {}
+                var obj = {};
+                try { obj = JSON.parse(raw || '{}'); } catch (_) { obj = {}; }
+                try {
+                  if (typeof intake_fillMeta_ === 'function') {
+                    obj = intake_fillMeta_(obj, { line_id: lineId, case_id: cid0 }) || obj;
+                  }
+                } catch (_) {}
+                // 呼び出し時の lineId/caseId を権威として最終上書き
+                try {
+                  obj = obj && typeof obj === 'object' ? obj : {};
+                  obj.meta = obj.meta || {};
+                  obj.meta.line_id = String(lineId);
+                  var ukeyFill = '';
+                  try { ukeyFill = drive_userKeyFromLineId_(lineId) || ''; } catch (_) {}
+                  if (!obj.meta.user_key && ukeyFill) obj.meta.user_key = ukeyFill;
+                  obj.meta.case_id = String(cid0);
+                  if (!obj.meta.case_key && ukeyFill && cid0) obj.meta.case_key = ukeyFill + '-' + cid0;
+                } catch (_) {}
+                var subIdNew = '';
+                try { if (typeof extractSubmissionId_ === 'function') subIdNew = extractSubmissionId_(name) || ''; } catch (_) {}
+                if (!subIdNew) { var mm = String(name || '').match(/__(\d+)\.json$/); if (mm) subIdNew = mm[1]; }
+                if (!subIdNew) subIdNew = String(Date.now());
+                var newName = 'intake__' + subIdNew + '.json';
+                var jsonStr = '';
+                try { jsonStr = JSON.stringify(obj); } catch (_) { jsonStr = raw || '{}'; }
+                try {
+                  caseFolder.createFile(Utilities.newBlob(jsonStr, 'application/json', newName));
+                  lastSavedName = newName;
+                } catch (_) {}
+                try { file.setTrashed(true); } catch (_) {}
+                try { moved++; } catch (_) {}
+              } catch (_) {}
               // 受領記録（submissions/cases_forms 更新）
               try {
                 var text = '';
@@ -797,13 +889,40 @@ function bs_collectIntakeFromStaging_(lineId, caseId) {
                 try {
                   data = JSON.parse(text);
                 } catch (_e2) {}
+                // submission_id の補完順序: 1) ファイル名 → 2) JSON → 3) 現在時刻
                 var sid = '';
-                if (data && typeof data === 'object') {
+                try {
+                  if (typeof extractSubmissionId_ === 'function') sid = extractSubmissionId_(name) || '';
+                } catch (_) {}
+                if (!sid) {
+                  var m = String(name || '').match(/__(\d+)\.json$/);
+                  if (m) sid = m[1];
+                }
+                if (!sid && data && typeof data === 'object') {
                   sid = String(
                     data.submission_id || (data.meta && data.meta.submission_id) || ''
                   ).trim();
                 }
-                if (typeof recordSubmission_ === 'function') {
+                if (
+                  typeof submissions_hasRow_ === 'function' &&
+                  typeof submissions_appendRow === 'function'
+                ) {
+                  if (!submissions_hasRow_(sid, 'intake')) {
+                    submissions_appendRow({
+                      submission_id: sid || String(Date.now()),
+                      form_key: 'intake',
+                      case_id: normalizedCaseId,
+                      user_key: drive_userKeyFromLineId_(lineId),
+                      line_id: lineId,
+                      submitted_at: new Date().toISOString(),
+                      referrer: lastSavedName || file.getName(),
+                      status: 'received',
+                    });
+                    try { appended++; } catch (_) {}
+                  }
+                }
+                // 旧API互換（最小限・最後の手段）
+                else if (typeof recordSubmission_ === 'function') {
                   recordSubmission_({
                     case_id: normalizedCaseId,
                     form_key: 'intake',
@@ -843,6 +962,83 @@ function bs_collectIntakeFromStaging_(lineId, caseId) {
       while (children.hasNext()) stack.push(children.next());
     }
   }
+
+  // 開発用: moved=0 かつ ALLOW_UNIQUE_RESCUE=1 のとき、直近5分・ユニーク1件を救済して meta を充填して書き込み
+  try {
+    if ((moved | 0) === 0) {
+      var allowUnique = (props_().getProperty('ALLOW_UNIQUE_RESCUE') || '').trim() === '1';
+      if (allowUnique) {
+        var root = DriveApp.getFolderById(DRIVE_ROOT_ID);
+        var candidates = [];
+        ['_email_staging', '_staging'].forEach(function (name) {
+          try {
+            var it = root.getFoldersByName(name);
+            if (!it.hasNext()) return;
+            var st = it.next();
+            var itf = st.getFiles();
+            while (itf.hasNext()) {
+              var f = itf.next();
+              var nm = f.getName && f.getName();
+              if (!/^intake__\d+\.json$/i.test(String(nm || ''))) continue;
+              var t = +((f.getLastUpdated && f.getLastUpdated()) || new Date(0));
+              candidates.push({ f: f, t: t, nm: nm });
+            }
+          } catch (_) {}
+        });
+        if (candidates.length === 1 && (Date.now() - candidates[0].t) <= 5 * 60 * 1000) {
+          try {
+            var rawU = '';
+            var jsU = {};
+            try { rawU = candidates[0].f.getBlob().getDataAsString('utf-8'); } catch (_) {}
+            try { jsU = JSON.parse(rawU || '{}'); } catch (_) { jsU = {}; }
+            jsU = jsU && typeof jsU === 'object' ? jsU : {};
+            jsU.meta = jsU.meta || {};
+            var ukeyU = drive_userKeyFromLineId_(lineId) || '';
+            if (!jsU.meta.line_id) jsU.meta.line_id = String(lineId);
+            if (!jsU.meta.user_key) jsU.meta.user_key = String(ukeyU || '');
+            if (!jsU.meta.case_id) jsU.meta.case_id = String(normalizedCaseId);
+            if (!jsU.meta.case_key && ukeyU && normalizedCaseId) jsU.meta.case_key = ukeyU + '-' + normalizedCaseId;
+            var sidU = '';
+            try { if (typeof extractSubmissionId_ === 'function') sidU = extractSubmissionId_(candidates[0].nm) || ''; } catch (_) {}
+            if (!sidU) { var mmu = String(candidates[0].nm || '').match(/__(\d+)\.json$/); if (mmu) sidU = mmu[1]; }
+            if (!sidU) sidU = String(Date.now());
+            var newNameU = 'intake__' + sidU + '.json';
+            var outU = '';
+            try { outU = JSON.stringify(jsU); } catch (_) { outU = rawU || '{}'; }
+            try { caseFolder.createFile(Utilities.newBlob(outU, 'application/json', newNameU)); } catch (_) {}
+            try { candidates[0].f.setTrashed(true); } catch (_) {}
+            moved++;
+            if (
+              typeof submissions_hasRow_ === 'function' &&
+              typeof submissions_appendRow === 'function' &&
+              !submissions_hasRow_(sidU, 'intake')
+            ) {
+              submissions_appendRow({
+                submission_id: sidU,
+                form_key: 'intake',
+                case_id: normalizedCaseId,
+                user_key: ukeyU,
+                line_id: lineId,
+                submitted_at: new Date().toISOString(),
+                referrer: newNameU,
+                status: 'received',
+              });
+              appended++;
+            }
+            if (typeof bs_setCaseStatus_ === 'function') {
+              try { bs_setCaseStatus_(normalizedCaseId, 'intake'); } catch (_) {}
+            }
+            try { Logger.log('[collectStaging] unique rescue lid=%s cid=%s', lineId, normalizedCaseId); } catch (_) {}
+          } catch (_) {}
+        }
+      }
+    }
+  } catch (_) {}
+
+  // 最終的な補填件数を出力（診断性向上）
+  try {
+    Logger.log('[collectStaging] lid=%s cid=%s moved=%s appended=%s', lineId, normalizedCaseId, moved, appended);
+  } catch (_) {}
 }
 
 function handleStatus_(lineId, caseId, hasIntake, userKey) {
@@ -853,12 +1049,7 @@ function handleStatus_(lineId, caseId, hasIntake, userKey) {
       JSON.stringify({ ok: true, caseId: '', intakeReady: false, hasIntake: intakeFlag })
     ).setMimeType(ContentService.MimeType.JSON);
   }
-  let folderId = resolveCaseFolderId_(lineId, normalizedCaseId);
-  if (!folderId && userKey) {
-    try {
-      folderId = bs_ensureCaseFolder_(userKey, normalizedCaseId);
-    } catch (_) {}
-  }
+  let folderId = resolveCaseFolderId_(lineId, normalizedCaseId, /*createIfMissing=*/false);
   const caseFolderReady = Boolean(folderId);
   if (!caseFolderReady) {
     try {
@@ -870,13 +1061,9 @@ function handleStatus_(lineId, caseId, hasIntake, userKey) {
     } catch (_) {}
   }
   let intakeReady = folderId ? bs_isIntakeJsonReady_(folderId) : false;
-  if (!intakeReady) {
+  if (!intakeReady && folderId) {
+    // 案件フォルダが存在するときのみ _staging を吸い上げる
     bs_collectIntakeFromStaging_(lineId, normalizedCaseId);
-    if (!folderId && userKey) {
-      try {
-        folderId = bs_resolveCaseFolderId_(userKey, normalizedCaseId, lineId);
-      } catch (_) {}
-    }
     intakeReady = folderId ? bs_isIntakeJsonReady_(folderId) : false;
   }
   return ContentService.createTextOutput(
@@ -930,10 +1117,9 @@ function doPost(e) {
     }
 
     if (action === 'markReopen') {
-      const contentType = (e && e.postData && e.postData.type) || '';
-      if (!contentType || contentType.toLowerCase().indexOf('application/json') === -1) {
-        return statusApi_jsonOut_({ ok: false, error: 'content_type_must_be_json' }, 415);
-      }
+      // status_api.js 側の POST ルータへ委譲（エントリ一本化）
+      if (typeof statusApi_doPost_ === 'function') return statusApi_doPost_(e);
+      // フォールバック: 直接ハンドラ呼び出し（互換）
       return statusApi_handleMarkReopenPost_(body || {});
     }
 
@@ -950,6 +1136,16 @@ function doPost(e) {
       .join('');
 
     ST = 'sig_checked';
+    // 追加: 時刻スキュー検証（±600秒）
+    try {
+      const nowSec = Math.floor(Date.now() / 1000);
+      if (!Number.isFinite(ts) || Math.abs(Number(ts) - nowSec) > 600) {
+        try { logCtx_('sig:ts-skew', { now: nowSec, ts: Number(ts), diff: Number(ts) - nowSec, action }); } catch (_) {}
+        return ContentService.createTextOutput(
+          JSON.stringify({ ok: false, error: 'ts_skew', now: nowSec, ts: Number(ts) })
+        ).setMimeType(ContentService.MimeType.JSON);
+      }
+    } catch (_) {}
     if (!(providedSig === expectB64Url || providedSig.toLowerCase() === expectHex)) {
       try {
         if (String(action) === 'intake_complete') {
@@ -992,6 +1188,7 @@ function doPost(e) {
     const up = bs_upsertContact_({ userKey, lineId, displayName, email });
 
     if (action === 'status') {
+      try { PropertiesService.getScriptProperties().setProperty('LAST_LINE_ID', lineId); } catch (_) {}
       const sh = bs_getSheet_(SHEET_CONTACTS);
       const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
       const idx = bs_toIndexMap_(headers);
@@ -1005,6 +1202,7 @@ function doPost(e) {
     }
 
     if (action === 'intake_complete') {
+      try { PropertiesService.getScriptProperties().setProperty('LAST_LINE_ID', lineId); } catch (_) {}
       ST = 'ensure_drive_root';
       bs_ensureDriveRoot_();
       const sh = bs_getSheet_(SHEET_CONTACTS);
@@ -1021,33 +1219,105 @@ function doPost(e) {
       ST = 'ensure_case_folder';
       const folderId = bs_ensureCaseFolder_(userKey, activeCaseId);
       ST = 'writeback_case_folder';
-      const shCases = bs_getSheet_(SHEET_CASES);
-      // cases シートの該当行に folderId を書く（最後に追加された or 探索）
-      const h2 = shCases.getRange(1, 1, 1, shCases.getLastColumn()).getValues()[0];
-      const i2 = bs_toIndexMap_(h2);
-      const caseIdx = aliasIdx(i2, 'case_id', ['caseId']);
-      const folderIdx = aliasIdx(i2, 'folder_id', ['folderId']);
-      const statusIdx = aliasIdx(i2, 'status', []);
-      const rc = shCases.getLastRow() - 1;
-      if (rc > 0 && caseIdx >= 0) {
-        const rows = shCases.getRange(2, 1, rc, h2.length).getValues();
-        for (let i = rows.length - 1; i >= 0; i--) {
-          if (bs_normCaseId_(rows[i][caseIdx]) === activeCaseId) {
-            if (folderIdx >= 0) shCases.getRange(i + 2, folderIdx + 1).setValue(folderId);
-            if (statusIdx >= 0) shCases.getRange(i + 2, statusIdx + 1).setValue('intake');
-            break;
+      // cases の更新は updateCasesRow_ があればそれを使い、無ければ手動で書き込み
+      try {
+        if (typeof updateCasesRow_ === 'function') {
+          updateCasesRow_(activeCaseId, {
+            case_key: userKey + '-' + activeCaseId,
+            folder_id: folderId,
+            status: 'intake',
+          });
+        } else {
+          const shCases = bs_getSheet_(SHEET_CASES);
+          // cases シートの該当行に folderId 等を書き込み（最後に追加された or 探索）
+          const h2 = shCases.getRange(1, 1, 1, shCases.getLastColumn()).getValues()[0];
+          const i2 = bs_toIndexMap_(h2);
+          const caseIdx = aliasIdx(i2, 'case_id', ['caseId']);
+          const folderIdx = aliasIdx(i2, 'folder_id', ['folderId']);
+          const statusIdx = aliasIdx(i2, 'status', []);
+          const caseKeyIdx = aliasIdx(i2, 'case_key', ['caseKey']);
+          // cases.case_id / case_key をテキスト（'@'）に固定（安全のため直前でも実施）
+          try {
+            if (typeof ensureCasesCaseIdTextFormat_ === 'function') ensureCasesCaseIdTextFormat_();
+            else {
+              const col = h2.indexOf('case_id') + 1;
+              if (col > 0) shCases.getRange(1, col, shCases.getMaxRows(), 1).setNumberFormat('@');
+            }
+            const ckCol = h2.indexOf('case_key') + 1;
+            if (ckCol > 0) shCases.getRange(1, ckCol, shCases.getMaxRows(), 1).setNumberFormat('@');
+          } catch (_) {}
+          const rc = shCases.getLastRow() - 1;
+          if (rc > 0 && caseIdx >= 0) {
+            const rows = shCases.getRange(2, 1, rc, h2.length).getValues();
+            for (let i = rows.length - 1; i >= 0; i--) {
+              if (bs_normCaseId_(rows[i][caseIdx]) === activeCaseId) {
+                if (folderIdx >= 0) shCases.getRange(i + 2, folderIdx + 1).setValue(String(folderId));
+                if (statusIdx >= 0) shCases.getRange(i + 2, statusIdx + 1).setValue('intake');
+                if (caseKeyIdx >= 0)
+                  shCases.getRange(i + 2, caseKeyIdx + 1).setNumberFormat('@').setValue(userKey + '-' + activeCaseId);
+                break;
+              }
+            }
           }
         }
-      }
+      } catch (_) {}
       ST = 'writeback_contacts';
       const shContacts = bs_getSheet_(SHEET_CONTACTS);
       const contactActiveIdx = aliasIdx(up.idx, 'active_case_id', ['activeCaseId']);
       if (contactActiveIdx >= 0) {
-        shContacts.getRange(up.row, contactActiveIdx + 1).setValue(activeCaseId);
+        shContacts.getRange(up.row, contactActiveIdx + 1).setNumberFormat('@').setValue(activeCaseId);
       }
       bs_setContactIntakeAt_(lineId, new Date().toISOString());
+      // 追加: payload があれば intake__*.json を案件直下へ直接保存（任意）
+      try {
+        const payloadRaw = (body || {}).payload;
+        const submissionIdRaw =
+          (body || {}).submissionId ?? (body || {}).submission_id ?? (body || {}).subId;
+        const submissionId = String(submissionIdRaw || '').trim() || String(Date.now());
+        if (payloadRaw != null) {
+          const cid = ('0000' + String(activeCaseId)).slice(-4);
+          const ukey = userKey;
+          const ckey = ukey + '-' + cid;
+          let obj = {};
+          try { obj = typeof payloadRaw === 'string' ? JSON.parse(payloadRaw) : (payloadRaw || {}); } catch (_) { obj = {}; }
+          obj = obj && typeof obj === 'object' ? obj : {};
+          obj.meta = obj.meta || {};
+          if (!obj.meta.line_id) obj.meta.line_id = (obj.meta.lineId || lineId || '');
+          if (!obj.meta.user_key) obj.meta.user_key = ukey;
+          if (!obj.meta.case_id) obj.meta.case_id = cid;
+          if (!obj.meta.case_key) obj.meta.case_key = ckey;
+
+          const jsonName = 'intake__' + submissionId + '.json';
+          try {
+            const jsonStr = JSON.stringify(obj);
+            DriveApp.getFolderById(folderId).createFile(
+              Utilities.newBlob(jsonStr, 'application/json', jsonName)
+            );
+          } catch (_) {}
+          // submissions 追記（重複ガード付き）
+          try {
+            if (
+              typeof submissions_hasRow_ === 'function' &&
+              typeof submissions_appendRow === 'function' &&
+              !submissions_hasRow_(submissionId, 'intake')
+            ) {
+              submissions_appendRow({
+                submission_id: String(submissionId),
+                form_key: 'intake',
+                case_id: cid,
+                user_key: ukey,
+                line_id: lineId,
+                submitted_at: new Date().toISOString(),
+                referrer: jsonName,
+                status: 'received',
+              });
+            }
+          } catch (_) {}
+        }
+      } catch (_) {}
+
       // _staging にある intake JSON を案件直下へ移送（存在すれば）
-      bs_collectIntakeFromStaging_(lineId, activeCaseId);
+      bs_collectIntakeFromStaging_(lineId, activeCaseId, folderId);
       const res = {
         ok: true,
         VER,
@@ -1056,6 +1326,9 @@ function doPost(e) {
         folderId,
         ts: new Date().toISOString(),
       };
+      try {
+        PropertiesService.getScriptProperties().setProperty('LAST_CASE_ID', activeCaseId);
+      } catch (_) {}
       ST = 'respond_ok';
       bs_appendLog_([new Date(), 'ok_intake', activeCaseId, folderId, userKey]);
       return bs_jsonResponse_(res, 200);

@@ -5,6 +5,7 @@ import UserInfo from '@/components/UserInfo';
 import FormProgressClient from '@/components/FormProgressClient';
 import { makeFormUrl, makeIntakeUrl } from '@/lib/formUrl';
 import { headers } from 'next/headers';
+import { tsSec, payloadV2, signV2, b64UrlFromString } from '@/lib/sig';
 import { unstable_noStore as noStore } from 'next/cache';
 // headers は不要。内部 API には相対パスで十分。
 
@@ -126,21 +127,35 @@ export default async function FormPage() {
     activeCaseId?: string | null;
   };
 
-  let status: StatusResponse | null = null;
-  try {
-    const res = await fetch(`${origin}/api/status`, {
-      method: 'GET',
-      headers: { 'x-line-id': lineId },
-      cache: 'no-store',
-    });
+  // SSR 側で 2 連打: 早すぎて反映前でも 2 発目で拾える確率を上げる
+  async function callStatusOnce(lid: string, cid: string | null) {
     try {
-      const data = (await res.json()) as StatusResponse;
-      status = data;
+      const ts = tsSec();
+      const pld = payloadV2(lid, cid || '', ts);
+      const url = new URL(`${origin}/api/status`);
+      url.searchParams.set('lineId', lid);
+      url.searchParams.set('caseId', cid || '');
+      url.searchParams.set('ts', ts);
+      url.searchParams.set('sig', signV2(pld));
+      url.searchParams.set('p', b64UrlFromString(pld));
+      const res = await fetch(url.toString(), {
+        method: 'GET',
+        headers: { 'x-line-id': lid, 'x-case-id': cid || '' },
+        cache: 'no-store',
+        next: { revalidate: 0 },
+      });
+      return res.ok ? ((await res.json()) as StatusResponse) : null;
     } catch {
-      status = null;
+      return null;
     }
-  } catch {
-    status = null;
+  }
+
+  let status: StatusResponse | null = await callStatusOnce(lineId, null);
+  if (!status?.intakeReady) {
+    // 800ms 後にもう一発（保存→収集のレースに強く）
+    await new Promise((r) => setTimeout(r, 800));
+    const s2 = await callStatusOnce(lineId, status?.caseId ?? status?.activeCaseId ?? null);
+    if (s2) status = s2;
   }
 
   const rawCaseId = status?.caseId ?? status?.activeCaseId ?? null;

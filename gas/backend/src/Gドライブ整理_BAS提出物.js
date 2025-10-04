@@ -440,7 +440,7 @@ function getStagingFolders_() {
   return out;
 }
 
-function moveJsonsUnderFolderToCase_(srcFolder, caseFolder, caseId) {
+function moveJsonsUnderFolderToCase_(srcFolder, caseFolder, caseId, lineId) {
   // 1) ファイルを処理
   const files = srcFolder.getFiles();
   while (files.hasNext()) {
@@ -454,10 +454,22 @@ function moveJsonsUnderFolderToCase_(srcFolder, caseFolder, caseId) {
       obj = JSON.parse(text);
     } catch (_) {}
 
-    const isIntakeByName = /^intake__/i.test(nm);
+    const isIntakeByName = (typeof isIntakeJsonName_ === 'function' ? isIntakeJsonName_(nm) : /^intake__/i.test(nm));
     const isIntakeByMeta = String(obj?.meta?.form_key || '').toLowerCase() === 'intake';
     const needsBinding = obj ? needsCaseBinding_(obj) : false;
     if (!(isIntakeByName || isIntakeByMeta || needsBinding)) continue;
+
+    // 追加ガード: 指定 lineId/caseId のものだけを対象にする（誤移送防止）
+    try {
+      const m = (obj && obj.meta) || {};
+      const uk = userKeyFromLineId_(lineId || '');
+      const cid4 = String(caseId || '').padStart(4, '0');
+      const wantCK = uk ? uk + '-' + cid4 : '';
+      const res = (typeof matchMetaToCase_ === 'function')
+        ? matchMetaToCase_(m, { case_key: wantCK, case_id: cid4, line_id: String(lineId || '') })
+        : { ok: true };
+      if (!res.ok) continue;
+    } catch (_) {}
 
     // meta.case_id を補完
     obj = obj || {};
@@ -766,7 +778,7 @@ function moveStagingIntakeJsonToCase_(lineId, caseId) {
         const unitIter = ym.getFolders(); // submission_* or email_hash
         while (unitIter.hasNext()) {
           const unit = unitIter.next();
-          moveJsonsUnderFolderToCase_(unit, caseFolder, caseId);
+          moveJsonsUnderFolderToCase_(unit, caseFolder, caseId, lineId);
           if (!unit.getFiles().hasNext() && !unit.getFolders().hasNext()) {
             try {
               ym.removeFolder(unit);

@@ -26,9 +26,10 @@
   - Gmail → Drive の自動整理
   - JSON 保存・命名ルール適用
   - OCR 実行（任意）
-  - `doPost` で API ルーティング（HMAC 検証）
-    - `action: "status"`：受付済みか（contacts.intakeAt）と activeCaseId を返す（副作用なし）
-    - `action: "intake_complete"`：初回のみ caseId を採番し、`<userKey-caseId>` フォルダ作成・cases/status を 'intake' に更新
+  - API ルーティング（HMAC 検証）
+    - `doGet(action="bootstrap")`：V2（GET + p/ts/sig, payload=`lineId|caseId|ts`）で受領、contacts/cases/Drive を保証
+    - `doGet(action="status")`：V2（GET + p/ts/sig）／V1（互換, HEX）の両対応。副作用あり（staging 吸い上げを起動）
+    - `doPost(action="intake_complete")`：V1（HEX）互換で受領。初回のみ caseId を採番し、`<userKey-caseId>` フォルダ作成・cases/status を 'intake' に更新
   - `caseId` 採番・管理（BAS_master スプレッドシート）
   - S2002 ドラフト生成（GDoc テンプレ差し込み）と今後の docx / xls 生成（裁判所提出様式）
   - 5 分間隔の時間トリガで Intake（S2002）処理を常時実行
@@ -112,9 +113,11 @@ BAS\_提出書類/
 ## 5. セキュリティ設計
 
 - **署名検証 (HMAC)**
-  - formlist → GAS（status/intake 完了通知）: `sig = HMAC_SHA256(lineId + '|' + ts, BOOTSTRAP_SECRET)`
-  - 受付フォーム URL 署名: `sig = HMAC_SHA256(lineId + '|' + ts, BOOTSTRAP_SECRET)`（caseId なし）
-  - 通常フォーム URL 署名: `sig = HMAC_SHA256(lineId + '|' + caseId + '|' + ts, BOOTSTRAP_SECRET)`
+  - V2（推奨・GET）: payload = `lineId|caseId|ts` を base64url 署名（`p/ts/sig`）
+    - `/api/bootstrap`（GAS: action=bootstrap）、`/api/status`（GAS: action=status）
+  - V1（互換・POST/一部GET）: `sig = HEX(HMAC_SHA256(`${ts}.${lineId}.${caseId}`))`
+    - `action=intake_complete` など既存互換用途で併用
+  - フォーム URL（外部 FormMailer への遷移）: `makeFormUrl` が V2 署名を生成し、`redirect_url` に `p/ts/sig/lineId/caseId` を付与
 
 ### 5.x メール取り込みガード（共通）
 

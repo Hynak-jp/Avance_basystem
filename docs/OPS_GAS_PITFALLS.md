@@ -14,7 +14,9 @@ BAS/GAS Known Pitfalls & Quick Fixes (歴史踏まえた再発防止メモ)
   - `ROOT_FOLDER_ID` … `https://drive.google.com/drive/folders/{ID}` の `{ID}`
   - `BAS_MASTER_SPREADSHEET_ID` … `https://docs.google.com/spreadsheets/d/{ID}/edit` の `{ID}`
 - **Spreadsheet → Sheet は二段取得**（`openById(...).getSheetByName(...)` のチェーン禁止）。
-- 署名方式は**統一**：`HMAC-SHA256( lineId + "|" + ts )` を **base64url**（末尾 `=` 除去）で比較。
+- 署名方式は**当面 V1/V2 併用**（最終的に V2 集約予定）
+  - V2（推奨, GET）: payload=`lineId|caseId|ts` を base64url 署名（`p/ts/sig`）
+  - V1（互換, POST/一部GET）: `sig = HEX(HMAC_SHA256(`${ts}.${lineId}.${caseId}`))`
 
 ---
 

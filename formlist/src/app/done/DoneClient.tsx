@@ -31,6 +31,11 @@ export default function DoneClient({ lineId }: { lineId: string }) {
           try { data = (await r.json()) as { ok?: boolean }; } catch {}
           console.log('intake_complete:', r.status, data);
           if (r.ok && (data?.ok ?? true)) {
+            // 追加: 保存直後に収集を明示的に起動（V2 署名は /api/status 側で生成）
+            try {
+              // caseId は任意（GAS 側で activeCaseId を推定）。fire-and-forget でもOK。
+              fetch('/api/status', { method: 'GET', headers: { 'x-line-id': lineId }, cache: 'no-store' }).catch(() => {});
+            } catch {}
             store.setStatus(storeKey, 'done');
             router.replace('/form');
             return;

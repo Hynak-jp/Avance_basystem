@@ -36,17 +36,19 @@
 
 ---
 
-## 3. caseId 仕様
+## 3. キーと役割（line_id / user_key / case_id）
 
-BAS の全データを束ねるためのキーとして **caseId** を導入する。
+BAS の実運用キーは次の3つです。役割がぶれないように使い分けます。
 
-- **単位**: ユーザーごとの案件
-- **userKey**: LINE ID の先頭 6 文字を小文字化
+- line_id（初回受付で確定）
+  - LINE のユーザーID。初回受付の導線で署名付きトークンとして渡され、GAS が検証・保存。
+  - 以後は表に出さず、裏側の照合にのみ使用する（プライバシー配慮）。
+- user_key（恒久キー）
+  - `line_id` の先頭6文字の小文字。ユーザー横断での入口や一覧の主キー。
   - 例: `Uc13df94016ee50eb9dd5552bffbe6624` → `uc13df`
-- **caseId**: ユーザー単位で採番する 4 桁ゼロ埋め連番
-  - 例: `0001`, `0002`, ...
-- **caseKey**: `userKey-caseId` で案件を一意に識別
-  - 例: `uc13df-0001`
+- case_id（案件の一次キー）
+  - ユーザー単位で採番する4桁ゼロ埋め連番。案件内の全処理（提出物、進捗、権限、請求、遷移）の主キー。
+  - 例: `0001`, `0002`, ...。`user_key-case_id` を `case_key` と呼ぶ（例: `uc13df-0001`）。
 
 ### 保存ルール
 
@@ -144,7 +146,43 @@ BAS_提出書類（ROOT_FOLDER_ID/DRIVE_ROOT_FOLDER_ID: 15QnwkhoXUkh8gVg56R3cSX-
 
 ---
 
-## 5. フォーム設計（例）
+## 5. フロー（正常系）と署名
+
+初回受付で `line_id` を確定・保存し、以後は `case_id` を軸に処理します。
+
+1) LINE起点
+- ユーザーが LINE から BAS を開く。サーバ側（Bot/中継）で `line_id` を把握（Messaging API の userId）。
+
+2) 署名トークン生成（V2）
+- payload = `line_id|case_id|ts`（初回は `case_id=''`）
+- `sig = base64url(HMAC_SHA256(payload, SECRET))`
+- `p = base64url(payload)` を付け、formlist/GAS の `/api/bootstrap`（GAS: action=bootstrap）へ誘導
+
+3) GAS で検証（bootstrap）
+- p/ts/sig を検証して `line_id` を復元
+- `contacts` に `line_id, user_key, display_name` を upsert
+- `active_case_id` が無ければ採番し付与（4桁）
+- `<user_key>-<case_id>/` を Drive に作成（cases 行を保証・folder_id/status 更新）
+
+4) ケース開始
+- 以後の各フォームは `meta.case_id` でひも付け。`line_id` は不要（裏で照合のみ）。
+
+署名方式（兼用）
+- V2（推奨・GET）: p/ts/sig を使う。payload=`lineId|caseId|ts` を base64url。
+- V1（互換・POST）: `sig = HEX(HMAC_SHA256(
+  `${ts}.${lineId}.${caseId}`, SECRET))`（intake_complete など既存互換のため存置）。
+
+Next.js 側の内部 API
+- `/api/bootstrap` → GET で GAS の action=bootstrap に V2 署名で到達
+- `/api/status` → GET で GAS の action=status に V2 署名で到達（ヘッダ: x-line-id, x-case-id）
+- `/api/intake/complete` → POST（V1 互換）
+
+staging 吸い上げ
+- `_email_staging` / `_staging` にある `intake__*.json` は、`/api/status`（GAS: action=status）を叩いたタイミングで `<case_key>/` 直下へ移送・重複排除。
+
+---
+
+## 6. フォーム設計（例）
 
 ### S2002 破産手続開始申立書フォーム
 
@@ -161,7 +199,7 @@ BAS_提出書類（ROOT_FOLDER_ID/DRIVE_ROOT_FOLDER_ID: 15QnwkhoXUkh8gVg56R3cSX-
 
 ---
 
-## 6. 将来拡張
+## 7. 将来拡張
 
 - OCR は「紙で提出された書類の補助入力」用途に縮小
 - フォーム入力から自動生成する公式様式の範囲を拡大
@@ -169,28 +207,26 @@ BAS_提出書類（ROOT_FOLDER_ID/DRIVE_ROOT_FOLDER_ID: 15QnwkhoXUkh8gVg56R3cSX-
 
 ---
 
-### 6.x 初回ログイン時フロー（bootstrap）の要点 — 追記
+### 7.x 初回ログイン時フロー（bootstrap）
 
-1. Next.js → GAS `/bootstrap`
-   - `lineId`, `displayName`, 署名（HMAC）を送信
-2. GAS 側
-   - `contacts` を upsert（`userKey` 算出）
-   - （アップデート）ログイン時は採番しない。初回の「受付フォーム」送信後に `intake_complete` を GAS に通知し、その時点で初採番・フォルダ作成を行う。
-3. 以降のフォーム URL には `caseId` を付与
-   - 保存する JSON の `meta.case_id` にも保持
+1. Next.js → GAS `/bootstrap`（V2 署名: p/ts/sig）
+2. GAS
+   - `contacts` を upsert（`user_key` 算出）
+   - `active_case_id` を採番 or 既存を使用
+   - Drive に `<user_key>-<case_id>/` を保証、`cases` 行を保証・`folder_id`/`status` 更新
+3. 以降のフォーム URL には `case_id` を付与（JSON の `meta.case_id` にも保存）
 
-## 7. 最小セット実装（caseId ブートストラップ）
+## 8. 最小セット実装（caseId ブートストラップ）
 
 本リリースで導入した「最小セット」の実装要点をまとめます。
 
 - 目的: 初回ログインで `activeCaseId=0001` を払い出し、以降のフォーム送信が自動で同一案件に紐づく。
 
-### 7.1 GAS（WebApp）側
+### 8.1 GAS（WebApp）側
 
-- エンドポイント: `doPost(e)` でブートストラップ受付
-- 署名検証: `sig = HMAC_SHA256(base, BOOTSTRAP_SECRET)`
-  - `base = lineId + '|' + ts`
-  - Script Properties に `BOOTSTRAP_SECRET` を設定
+- エンドポイント: `doGet(e)` の `action=bootstrap`（V2: p/ts/sig）
+- 署名検証: payload=`lineId|caseId|ts` を base64url 署名（p/ts/sig）
+- Script Properties: `BAS_MASTER_SPREADSHEET_ID`, `DRIVE_ROOT_FOLDER_ID`（or `ROOT_FOLDER_ID`）
 - 処理フロー:
   - `contacts` を upsert（`lineId, displayName, userKey, rootFolderId, nextCaseSeq, activeCaseId`）
   - `activeCaseId` 未設定なら `allocateNextCaseId_()` で 4 桁採番し `setActiveCaseId_()`
@@ -207,18 +243,16 @@ BAS_提出書類（ROOT_FOLDER_ID/DRIVE_ROOT_FOLDER_ID: 15QnwkhoXUkh8gVg56R3cSX-
   - 概要: 旧直下のカテゴリフォルダ配下のファイルを、`<caseKey>/attachments/<カテゴリ>/` へ移送（`content_hash` で重複回避）
   - 実行: GAS エディタから `migrateLegacyUserFolderToCaseKey_(lineId, caseId, displayName)` を呼び出す
 
-### 7.2 Next.js 側
+### 8.2 Next.js 側
 
-- サーバールート: `/api/bootstrap`
-  - リクエスト: `{ lineId, displayName, ts, sig }`
-  - `sig = HMAC_SHA256(lineId + '|' + ts, BOOTSTRAP_SECRET)`
-  - 環境変数: `GAS_ENDPOINT`, `BOOTSTRAP_SECRET`
+- サーバールート: `/api/bootstrap`（GET → GAS action=bootstrap, V2）
+  - 環境変数: `GAS_ENDPOINT`, `BOOTSTRAP_SECRET`（or `TOKEN_SECRET`）
 - クライアント: ログイン直後に `/api/bootstrap` を 1 回叩く（冪等）
-- フォーム URL 付与: `makeFormUrl(base, lineId, caseId)`
-  - 付与パラメータ: `lineId`, `caseId`, `ts`, `sig`
-  - `sig = HMAC_SHA256(lineId + '|' + caseId + '|' + ts, BOOTSTRAP_SECRET)`
+- フォーム URL 付与: `makeFormUrl(base, lineId, caseId)`（サーバ専用）
+  - 付与: `redirect_url` に `lineId/caseId/ts/p/sig`（V2）を載せる
+  - intake: `makeIntakeUrl(intakeBase, intakeRedirect)`（`caseId=''` で署名）
 
-### 7.3 FormMailer 側（META テンプレート）
+### 8.3 FormMailer 側（META テンプレート）
 
 通知メールの META ブロックに `case_id` を必ず出す。例:
 
@@ -231,3 +265,131 @@ case_id: %%_CASE_ID_%%
 ```
 
 これにより GAS 側が `meta.case_id` を JSON へ確実に保存し、マージ処理で案件単位に束ねられます。
+
+---
+
+## 9. 命名規約：snake_case / camelCase の運用方針
+
+ゴールデンルール
+
+- データ層（シート・JSON保存・Driveメタ）＝ snake_case を正
+- アプリ層（TypeScript/React の変数・プロパティ）＝ camelCase を正
+- 双方向の境界では正規化ユーティリティを必ず経由し、snake 優先＋camel 互換で“読む”、snake で“書く”。
+
+使い分けの適用範囲
+
+- snake_case（正）
+  - Google Sheets の列名（例：case_id, user_key, folder_id, active_case_id）
+  - 永続化される JSON のキー（intake__*.json, submissions 行の JSON 等）
+  - Drive 上のメタ情報を JSON 化する際のキー
+  - GAS（Apps Script）で台帳に書き戻すときのキー
+
+- camelCase（正）
+  - TypeScript/React のローカル変数・props・関数名（例：activeCaseId, folderId）
+  - API レスポンスをフロントで一時的に扱う型（ただし保存前に snake へ）
+
+- NG（避ける）
+  - シート列に camelCase を新規追加すること（互換維持で“読む”のはOK）
+  - フロント→GAS で camel のまま直接書き戻し（正規化関数を噛ませる）
+
+正規化ユーティリティ（境界で必ず通す）
+
+JS/TS（共通ユーティリティ例）
+
+```ts
+// snake ⇄ camel を相互変換（浅い構造を想定）
+export const toCamel = <T extends Record<string, any>>(row: T) =>
+  Object.fromEntries(
+    Object.entries(row).map(([k, v]) => [k.replace(/_([a-z])/g, (_,$1)=>$1.toUpperCase()), v])
+  ) as any;
+
+export const toSnake = <T extends Record<string, any>>(row: T) =>
+  Object.fromEntries(
+    Object.entries(row).map(([k, v]) => [k.replace(/[A-Z]/g, c => `_${c.toLowerCase()}`), v])
+  ) as any;
+
+// 読み出し時：snake 優先＋camel 互換で拾う
+export const pickField = (row: any, snake: string) => {
+  const camel = snake.replace(/_([a-z])/g, (_,$1)=>$1.toUpperCase());
+  return row[snake] ?? row[camel] ?? '';
+};
+```
+
+GAS（Apps Script）側のフィールド取得ヘルパ例
+
+```js
+function getField_(obj, snake) {
+  var camel = snake.replace(/_([a-z])/g, function(_, s){ return s.toUpperCase(); });
+  return (obj && (obj[snake] != null ? obj[snake] : obj[camel])) || '';
+}
+
+// 例：cases 行
+var caseId  = getField_(row, 'case_id');
+var userKey = getField_(row, 'user_key');
+var folderId= getField_(row, 'folder_id');
+```
+
+シート設計ルール
+
+- 既存列は snake に統一（例：active_case_id）。
+- 互換期間中は読み取りのみ camel 互換可（getField_/pickField で吸収）。
+- 新規列は必ず snake。PR レビューでチェックする。
+
+典型スキーマ
+
+- contacts: `line_id, user_key, display_name, active_case_id, updated_at`
+- cases: `case_id, user_key, folder_id, status, created_at, updated_at`
+- submissions: `case_id, form_key, submission_id, file_id, saved_at`
+
+API/署名・JSON/保存の扱い
+
+- 署名ペイロードは仕様（V1/V2）に従うが、内部に展開した後のキー名は snake に揃えて JSON 保存。
+- フロントの API 型は camel で扱い、保存・書戻しの直前に `toSnake` を通す。
+
+型定義（フロント側例）
+
+```ts
+// フロント内部用（camel）
+export type CaseRow = {
+  caseId: string;
+  userKey: string;
+  folderId: string;
+  status: 'draft'|'intake'|'submitted'|'complete';
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+// 保存時は snake へ
+const saveCase = async (row: CaseRow) => {
+  const payload = toSnake(row); // { case_id, user_key, ... }
+  await fetch('/api/cases/save', { method: 'POST', body: JSON.stringify(payload) });
+};
+```
+
+マイグレーション方針（既存データに混在がある場合）
+
+- 列名を snake に揃える（例：activeCaseId → active_case_id）。
+- GAS 側の読み出しを snake 優先＋camel 互換で暫定運用（getField_ を使用）。
+- バッチで既存行の camel キーを snake 列にコピー（手動/スクリプト）。
+- 期限を切って camel 列（旧列）を削除。
+
+PR/レビュー・Lint ルール
+
+- サーバ／GAS で書き戻す JSON のキー名が camel のままなら差し戻し。
+- 新規シート列に camel があれば差し戻し。
+- ESLint：フロントは camel を基本、id 系だけ snake からのマッピングを許容（例：最小限の naming-convention 除外）。
+
+落とし穴と対策
+
+- 表計算の手入力で camel 列が紛れる → スプレッドシートに「注意書き」行を固定表示。
+- フォーム→メール→JSON の途中で camel 化 → 取り込み時に snake へ正規化して保存。
+- Drive メタからそのまま書戻す → 必ず `toSnake` を通してから保存。
+
+チェックリスト（PR 時に見るポイント）
+
+- [ ] シート列はすべて snake_case
+- [ ] 保存系 API は `toSnake` を通している
+- [ ] GAS の書戻しは snake キーのみ
+- [ ] 読み出しは snake 優先＋camel 互換（getField_/pickField 使用）
+- [ ] 新規 JSON（staging/ケースフォルダ）のキーは snake
+- [ ] ドキュメントの例コードも命名規約に従っている

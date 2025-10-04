@@ -19,14 +19,16 @@ Codex へのお願い（常設メモ）：
 
 - **formlist/**（Next.js, Vercel 想定）
   - LINE で認証（NextAuth）。ログイン後に提出フォーム一覧（外部 FormMailer）を表示
-  - 署名付き URL（`lineId, caseId, ts, sig`）を生成して外部フォームへ遷移
+  - 署名付き URL を生成して外部フォームへ遷移（サーバ専用の `formUrl.ts` が V2 署名を生成し、`redirect_url` に `p/ts/sig/lineId/caseId` を付与）
   - 送信完了後は `redirect_url`（本アプリの `/done`）に戻し、ローカル進捗を更新
   - 画像/OCR 抽出の社内 API: `/api/extract` を提供（OpenAI API を利用）
 - **gas/**（Google Apps Script）
   - Gmail ラベルを監視して Drive へ「浅い構造」で自動整理、JSON 保存、台帳スプレッドシート更新
   - 添付画像は公開直リンク化 → Next の `/api/extract` に POST → `_model.json` を生成可能
   - 仕上げ用パッチで Google Doc 作成 → DOCX にエクスポート
-  - WebApp `doPost` で bootstrap（HMAC 検証・caseId 採番）
+  - WebApp ルーティング（HMAC 検証）
+    - `doGet(action=bootstrap/status)`：V2（GET + p/ts/sig）対応（status は staging 吸い上げの副作用あり）
+    - `doPost(action=intake_complete)`：V1（HEX）互換
 - **Google Drive / Spreadsheet**
   - `BAS_提出書類/` 配下にユーザー別フォルダを作成・整理
   - JSON: `<formkey>__<submissionId>.json`
@@ -64,7 +66,7 @@ formlist/
 │ ├─ done/page.tsx, done/DoneClient.tsx # 送信完了で進捗更新して /form へ戻す
 │ ├─ api/auth/[...nextauth]/route.ts # NextAuth（LINE）
 │ ├─ api/bootstrap/route.ts # GAS bootstrap を叩いて activeCaseId を取得
-│ ├─ api/status/route.ts # intake 済みか問い合わせ（副作用なし）
+│ ├─ api/status/route.ts # intake 済みか問い合わせ（副作用あり：staging 吸い上げも起動）
 │ ├─ api/intake/complete/route.ts # 受付完了通知 → GAS で初採番
 │ ├─ api/avatar/route.ts # 外部アバターを同一オリジン経由でプロキシ
 │ └─ api/extract/route.ts # OpenAI を用いた給与明細抽出 API（CORS 対応）
@@ -76,7 +78,7 @@ formlist/
 │ ├─ auth.ts # NextAuth 設定（LINE プロバイダ）
 │ ├─ callGas.ts # GAS WebApp を叩くヘルパ（現状は未使用）
 │ ├─ progressStore.ts # フォーム進捗（Zustand + localStorage）
-│ ├─ formUrl.ts # 署名付きフォームURL生成（HMAC: lineId|caseId|ts）
+│ ├─ formUrl.ts # 署名付きフォームURL生成（サーバ専用 / V2: base64url, payload=lineId|caseId|ts を redirect_url に付与）
 │ └─ utils.ts
 ├─ src/types/next-auth.d.ts # Session/JWT 拡張（lineId 等）
 ├─ middleware.ts # /form への直接アクセスを /login へ誘導（lineId Cookie 前提）
@@ -131,7 +133,7 @@ gas/hello-world/src/
 
 - 現状は Gmail ラベルベースのバッチ処理（`processLabel` など）で駆動
 - S2002 Intake の処理を 5 分間隔（`run_ProcessInbox_S2002`）で実行（メール → JSON → GDoc ドラフト）
-- WebApp `doPost` 実装済み（Next → GAS のブートストラップ連携・HMAC 検証）
+  - WebApp ルーティング：`doGet(action=bootstrap/status)`（V2）/ `doPost(action=intake_complete)`（V1）
 - `gas/.vscode/tasks.json` に clasp 用タスクあり（push/open/pull）
 
 ### 3.3 スプレッドシート（台帳）

@@ -435,6 +435,7 @@ function statusApi_collectStaging_(lineId, caseId) {
       try {
         var caseFolder = DriveApp.getFolderById(String(folderId));
         var foundMove = null;
+        foundNames = foundNames || [];
         var stagingListMove = [];
         try {
           var rootMv = (typeof drive_getRootFolder_ === 'function') ? drive_getRootFolder_() : null;
@@ -452,27 +453,21 @@ function statusApi_collectStaging_(lineId, caseId) {
           while (!foundMove && itf.hasNext()) {
             var f = itf.next();
             var nm = f.getName && f.getName();
-            if (!nm || !/^intake__\d+\.json$/i.test(nm)) continue;
+            if (!nm || !isIntakeJsonName_(nm)) continue;
             try {
               var txt = '';
               try { txt = f.getBlob().getDataAsString('utf-8'); } catch (_) {}
               var js = null;
               try { js = JSON.parse(txt); } catch (_) {}
               var m = (js && js.meta) || {};
-              var fileCKey = String(m.case_key || js.case_key || '').trim();
-              var fileCID = String(m.case_id || js.case_id || '').trim();
-              var fileLID = String(m.line_id || m.lineId || '').trim();
-              var matched = false;
-              // 優先度: case_id → line_id → case_key（uk 欠落時の "-0001" などを回避）
-              if (fileCID && statusApi_normCaseId_(fileCID) === cid) matched = true;
-              else if (fileLID && fileLID === lid) matched = true;
-              else if (ckeyMv && fileCKey && fileCKey === ckeyMv) matched = true;
-              if (matched) { foundMove = { file: f, name: nm }; }
+              var res_mv = matchMetaToCase_(m, { case_key: ckeyMv, case_id: cid, line_id: lid });
+              if (res_mv && res_mv.ok) { attachReason = res_mv.by || attachReason; foundMove = { file: f, name: nm }; }
             } catch (_) {}
           }
         });
         if (foundMove) {
           try {
+            try { Logger.log('[collectStaging] move name=%s by=%s → folderId=%s', foundMove.name || '', attachReason || '', String(folderId)); } catch (_) {}
             caseFolder.createFile(foundMove.file.getBlob());
             try { foundMove.file.setTrashed(true); } catch (_) {}
             try { moved++; } catch (_) {}
@@ -523,22 +518,25 @@ function statusApi_collectStaging_(lineId, caseId) {
           while (!foundForThis && itf.hasNext()) {
             var f = itf.next();
             var nm = f.getName && f.getName();
-            if (!nm || !/^intake__\d+\.json$/i.test(nm)) continue;
+            if (!nm) continue;
+            if (isIntakeJsonName_(nm)) { try { foundNames.push(nm); } catch(_) {} } else { continue; }
             try {
               var txt = '';
               try { txt = f.getBlob().getDataAsString('utf-8'); } catch (_) {}
               var js = null;
               try { js = JSON.parse(txt); } catch (_) {}
               var m = (js && js.meta) || {};
-              var fileCKey = String(m.case_key || js.case_key || '').trim();
-              var fileCID = String(m.case_id || js.case_id || '').trim();
-              var fileLID = String(m.line_id || m.lineId || '').trim();
-              var matched = false;
-              // 優先度: case_id → line_id → case_key
-              if (fileCID && statusApi_normCaseId_(fileCID) === cid) matched = true;
-              else if (fileLID && fileLID === lid) matched = true;
-              else if (ckey && fileCKey && fileCKey === ckey) matched = true;
-              if (matched) { foundForThis = { file: f, js: js, name: nm, fileCKey: fileCKey, fileCID: fileCID }; }
+              var res_nf = matchMetaToCase_(m, { case_key: ckey, case_id: cid, line_id: lid });
+              if (res_nf && res_nf.ok) {
+                attachReason = res_nf.by || attachReason;
+                foundForThis = {
+                  file: f,
+                  js: js,
+                  name: nm,
+                  fileCKey: String(m.case_key || js.case_key || '').trim(),
+                  fileCID: String(m.case_id || js.case_id || '').trim(),
+                };
+              }
             } catch (_) {}
           }
         });
@@ -564,6 +562,7 @@ function statusApi_collectStaging_(lineId, caseId) {
           folderId = caseFolder.getId();
           // ファイルを案件直下へコピー（原本は削除）
           try {
+            try { Logger.log('[collectStaging] move name=%s by=%s → folderId=%s', foundForThis.name || '', attachReason || '', String(folderId)); } catch (_) {}
             caseFolder.createFile(foundForThis.file.getBlob());
             try { foundForThis.file.setTrashed(true); } catch (_) {}
           } catch (_) {}
@@ -607,12 +606,58 @@ function statusApi_collectStaging_(lineId, caseId) {
       }
     }
 
-    // 既存フォルダがある場合のみ mover を呼ぶ
+    // 既存フォルダがあっても、自前で staging を走査して intake__*.json を移送（委譲に頼らない）
     try {
-      if (typeof bs_collectIntakeFromStaging_ === 'function') {
-        try { bs_collectIntakeFromStaging_(lid, cid); } catch (_) { try { bs_collectIntakeFromStaging_(); } catch (_) {} }
-      } else if (typeof moveStagingIntakeJsonToCase_ === 'function') {
-        try { moveStagingIntakeJsonToCase_(lid, cid); } catch (_) { try { moveStagingIntakeJsonToCase_(); } catch (_) {} }
+      var caseFolder = DriveApp.getFolderById(folderId);
+      var root = (typeof drive_getRootFolder_ === 'function') ? drive_getRootFolder_() : null;
+      var stagingList = [];
+      ['_email_staging', '_staging'].forEach(function (name) {
+        try {
+          var it = root ? root.getFoldersByName(name) : DriveApp.getFoldersByName(name);
+          if (it && it.hasNext()) stagingList.push(it.next());
+        } catch (_) {}
+      });
+      var ukey = typeof drive_userKeyFromLineId_ === 'function' ? drive_userKeyFromLineId_(lid) : uk;
+      var ckey = (ukey ? (ukey + '-' + cid) : '');
+
+      var found = null;
+      stagingList.forEach(function (staging) {
+        if (found) return;
+        var itf = staging.getFiles();
+        while (!found && itf.hasNext()) {
+            var f = itf.next();
+            var nm = f.getName && f.getName();
+            if (!nm) continue;
+            if (isIntakeJsonName_(nm)) { try { foundNames.push(nm); } catch(_) {} } else { continue; }
+          try {
+            var txt = f.getBlob().getDataAsString('utf-8');
+            var js = JSON.parse(txt);
+            var m = (js && js.meta) || {};
+            var fileCKey = String(m.case_key || js.case_key || '').trim();
+            var fileCID  = String(m.case_id  || js.case_id  || '').trim();
+            var fileLID  = String(m.line_id  || m.lineId    || '').trim();
+            var matched = false;
+            if (fileCKey && fileCKey === ckey) matched = true;
+            else if (fileCID && statusApi_normCaseId_(fileCID) === cid) matched = true;
+            else if (fileLID && fileLID === lid) matched = true;
+            if (matched) { found = { file: f, name: nm, js: js, ckey: fileCKey }; }
+          } catch (_) {}
+        }
+      });
+      if (found) {
+        try {
+          // そのままコピーすると BOM/改行扱いが変わることがあるので一度 JSON stringify（meta 補完も可）
+          var obj = found.js || {};
+          obj.meta = obj.meta || {};
+          if (!obj.meta.case_id)  obj.meta.case_id  = cid;
+          if (!obj.meta.user_key) obj.meta.user_key = ukey || uk;
+          if (!obj.meta.case_key && (ukey || uk)) obj.meta.case_key = (ukey || uk) + '-' + cid;
+          var saved = JSON.stringify(obj);
+          try { Logger.log('[collectStaging] move name=%s by=%s → folderId=%s', found.name || '', attachReason || '', String(folderId)); } catch (_) {}
+          caseFolder.createFile(Utilities.newBlob(saved, 'application/json', found.name));
+          try { found.file.setTrashed(true); } catch (_) {}
+          try { moved++; } catch (_) {}
+        } catch (_) {}
       }
     } catch (_) {}
 
@@ -680,7 +725,7 @@ function statusApi_collectStaging_(lineId, caseId) {
           while (itf2.hasNext()) {
             var ff = itf2.next();
             var nmf = ff.getName && ff.getName();
-            if (!/^intake__\d+\.json$/i.test(String(nmf || ''))) continue;
+            if (!isIntakeJsonName_(String(nmf || ''))) continue;
             var mt = (ff.getLastUpdated && ff.getLastUpdated()) || new Date(0);
             var t = +mt;
             if (t > newestTime) {
@@ -695,21 +740,23 @@ function statusApi_collectStaging_(lineId, caseId) {
           try { txtFS = newest.getBlob().getDataAsString('utf-8'); } catch(_){}
           try { jsFS = JSON.parse(txtFS||'{}'); } catch(_) { jsFS = {}; }
           var mFS = (jsFS && jsFS.meta) || {};
-          var lidFS = String(mFS.line_id || mFS.lineId || '').trim();
           var cidFS = String(mFS.case_id || jsFS.case_id || '').trim();
-          var ckeyFS0 = String(mFS.case_key || jsFS.case_key || '').trim();
-          // ファイル側の case_id を優先して救済（外からの cid が空でも動く）
-          var cid4 = typeof statusApi_normCaseId_ === 'function' ? statusApi_normCaseId_(cidFS || cid) : (cidFS || cid);
+          var cid4 = normCaseId_(cidFS || cid);
           var okAttach = false;
-          if (lidFS && lidFS === lid) { okAttach = true; attachReason = 'line_id'; }
-            var emailFS = String(
+          var ukeyFS_chk = (typeof drive_userKeyFromLineId_==='function') ? drive_userKeyFromLineId_(lid) : '';
+          var mt3 = matchMetaToCase_(
+            { case_key: String(mFS.case_key || jsFS.case_key || ''), case_id: cidFS, line_id: String(mFS.line_id || mFS.lineId || '') },
+            { case_key: (ukeyFS_chk ? (ukeyFS_chk + '-' + cid4) : ''), case_id: cid4, line_id: lid }
+          );
+          if (mt3 && mt3.ok) { okAttach = true; attachReason = mt3.by || attachReason; }
+          var emailFS = String(
               (jsFS.fields && (jsFS.fields.email || jsFS.fields['メールアドレス'])) ||
               (jsFS.model  && (jsFS.model.email  || jsFS.model['email'])) || ''
             ).trim();
-            if (!okAttach && emailFS && typeof contacts_lookupByEmail_ === 'function') {
-              var cinfoFS = contacts_lookupByEmail_(emailFS);
-              if (cinfoFS && cinfoFS.line_id && cinfoFS.line_id === lid) { okAttach = true; attachReason = 'email'; }
-            }
+          if (!okAttach && emailFS && typeof contacts_lookupByEmail_ === 'function') {
+            var cinfoFS = contacts_lookupByEmail_(emailFS);
+            if (cinfoFS && cinfoFS.line_id && cinfoFS.line_id === lid) { okAttach = true; attachReason = 'email'; }
+          }
             if (!okAttach) {
               if (cidFS && statusApi_normCaseId_(cidFS) === cid4) { okAttach = true; attachReason = 'case_id'; }
               var ukeyFS_chk = (typeof drive_userKeyFromLineId_==='function') ? drive_userKeyFromLineId_(lid) : '';
@@ -793,6 +840,19 @@ function statusApi_collectStaging_(lineId, caseId) {
       }
     } catch (_) {}
     try { Logger.log('[collectStaging] lid=%s cid=%s moved=%s appended=%s by=%s', lid, cid, moved, appended, attachReason); } catch (_) {}
+    if (!moved || moved === 0) {
+      try { Logger.log('[collectStaging] candidates(name)=%s', JSON.stringify((foundNames || []).slice(0, 10))); } catch (_) {}
+      // 直近60秒以内に staging にファイルが来たら一度だけ再試行
+      try {
+        var cache = CacheService.getScriptCache();
+        var onceKey = ['collect_retry_once', lid || '', cid || ''].join(':');
+        if (!cache.get(onceKey) && tryFindRecentIntakeJson_(lid, cid, 60)) {
+          cache.put(onceKey, '1', 120); // 2分の間は再入禁止
+          try { Logger.log('[collectStaging] retry-after-recent-staging lid=%s cid=%s', lid, cid); } catch(_){}
+          try { statusApi_collectStaging_(lid, cid); } catch(_){}
+        }
+      } catch (_) {}
+    }
   } catch (err) {
     try {
       Logger.log('[status_api] staging sweep error: %s', (err && err.stack) || err);
@@ -858,6 +918,11 @@ function ensureCasesCaseIdTextFormat_() {
 /** GET /exec?action=status&caseId=&lineId=&ts=&sig= */
 function doGet(e) {
   const p = (e && e.parameter) || {};
+  // 追加: ルートIDの観測（設定ズレの早期検知）
+  try {
+    var PROPS = PropertiesService.getScriptProperties();
+    Logger.log('[config] ROOT_FOLDER_ID=%s DRIVE_ROOT_FOLDER_ID=%s', PROPS.getProperty('ROOT_FOLDER_ID') || '', PROPS.getProperty('DRIVE_ROOT_FOLDER_ID') || '');
+  } catch (_) {}
   try {
     if (typeof logCtx_ === 'function') {
       logCtx_('router:in', {
