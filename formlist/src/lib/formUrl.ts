@@ -10,11 +10,25 @@ const SECRET =
   })();
 
 const b64url = (s: string) => s.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+const b64urlFromString = (s: string) => b64url(Buffer.from(s, 'utf8').toString('base64'));
 const makePayload = (lineId: string, caseId: string, ts: string) => `${lineId}|${caseId}|${ts}`;
 const signV2 = (payload: string) => b64url(crypto.createHmac('sha256', SECRET).update(payload, 'utf8').digest('base64'));
 
-function getOriginSafe(): string {
-  return process.env.NEXT_PUBLIC_BASE_URL || '';
+// 追加: originの安全取得（SSR/Edge/Browser全部OK）
+export function getOriginSafe(): string | undefined {
+  if (typeof window !== 'undefined') return window.location.origin; // client
+  const env =
+    process.env.NEXT_PUBLIC_SITE_ORIGIN ||
+    (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined) ||
+    process.env.NEXT_PUBLIC_BASE_URL ||
+    undefined;
+  return env; // undefined のままでもOK（後で判定）
+}
+
+// 追加: base が空/未定義なら 1引数版で呼ぶ
+export function safeURL(input: string, base?: string) {
+  if (base && base.trim().length > 0) return new URL(input, base);
+  return new URL(input);
 }
 
 // ts を常に「UNIX秒」で生成（呼び出し側の曖昧さを排除）
@@ -34,10 +48,11 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opt
   const ts = tsSec(); // UNIX秒
   const payload = makePayload(lineId, caseId, ts);
   const sig = signV2(payload);
-  const p = b64url(Buffer.from(payload, 'utf8').toString('base64'));
+  const p = b64urlFromString(payload);
 
   // 1) ユーザーが戻ってくるURL（自サイト）
-  const redirect = new URL(opts?.redirectUrl ?? '/', getOriginSafe());
+  const origin = getOriginSafe();
+  const redirect = safeURL(opts?.redirectUrl ?? '/', origin);
   redirect.searchParams.set('lineId', lineId);
   redirect.searchParams.set('caseId', caseId);
   redirect.searchParams.set('ts', ts);
@@ -47,9 +62,9 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opt
   if (opts?.extra) for (const [k, v] of Object.entries(opts.extra)) redirect.searchParams.set(k, v);
 
   // 2) FormMailer 側のURLに、redirect_url を渡す
-  const url = new URL(baseUrl);
+  const url = safeURL(baseUrl, origin);
   url.searchParams.set('redirect_url', redirect.toString());
-  url.searchParams.set('referrer', getOriginSafe());
+  url.searchParams.set('referrer', origin ?? '');
   return url.toString();
 }
 
@@ -64,18 +79,19 @@ export function makeIntakeUrl(intakeBase: string, intakeRedirect: string): strin
   const caseId = '';
   const payload = makePayload(lineId, caseId, ts);
   const sig = signV2(payload);
-  const p = b64url(Buffer.from(payload, 'utf8').toString('base64'));
+  const p = b64urlFromString(payload);
 
-  const redirect = new URL(intakeRedirect);
+  const origin = getOriginSafe();
+  const redirect = safeURL(intakeRedirect, origin);
   redirect.searchParams.set('lineId', lineId);
   redirect.searchParams.set('caseId', caseId);
   redirect.searchParams.set('ts', ts);
   redirect.searchParams.set('sig', sig);
   redirect.searchParams.set('p', p);
 
-  const url = new URL(intakeBase);
+  const url = safeURL(intakeBase, origin);
   url.searchParams.set('redirect_url', redirect.toString());
-  url.searchParams.set('referrer', getOriginSafe());
+  url.searchParams.set('referrer', origin ?? '');
   return url.toString();
 }
 
@@ -89,17 +105,18 @@ export function buildIntakeRedirectUrl(
   const ts = tsSec();
   const payload = makePayload(lineId || '', caseId || '', ts);
   const sig = signV2(payload);
-  const p = b64url(Buffer.from(payload, 'utf8').toString('base64'));
+  const p = b64urlFromString(payload);
 
-  const redirect = new URL(intakeRedirect);
+  const origin = getOriginSafe();
+  const redirect = safeURL(intakeRedirect, origin);
   redirect.searchParams.set('lineId', lineId || '');
   redirect.searchParams.set('caseId', caseId || '');
   redirect.searchParams.set('ts', ts); // 秒
   redirect.searchParams.set('sig', sig);
   redirect.searchParams.set('p', p);
 
-  const url = new URL(intakeBase);
+  const url = safeURL(intakeBase, origin);
   url.searchParams.set('redirect_url', redirect.toString());
-  url.searchParams.set('referrer', getOriginSafe());
+  url.searchParams.set('referrer', origin ?? '');
   return url.toString();
 }
