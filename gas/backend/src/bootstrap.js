@@ -231,30 +231,8 @@ function bootstrap_(e) {
     try { bs_ensureCaseRow_(caseId, userKey, lineId); } catch (_) {}
   }
 
-  // [LOG-6] フォルダ保証 + cases に folder_id/status 書き戻し
-  let folderId = '';
-  try { folderId = bs_ensureCaseFolder_(userKey, caseId); } catch (_) {}
-  try {
-    const shCases = bs_getSheet_(SHEET_CASES);
-    const h2 = shCases.getRange(1, 1, 1, shCases.getLastColumn()).getValues()[0];
-    const i2 = bs_toIndexMap_(h2);
-    const rc = shCases.getLastRow() - 1;
-    const colCase = i2['case_id'] != null ? i2['case_id'] : i2['caseId'];
-    const colFolder = i2['folder_id'] != null ? i2['folder_id'] : i2['folderId'];
-    const colStatus = i2['status'];
-    if (rc > 0 && colCase != null) {
-      const rows = shCases.getRange(2, 1, rc, h2.length).getValues();
-      for (let i = rows.length - 1; i >= 0; i--) {
-        if (bs_normCaseId_(rows[i][colCase]) === caseId) {
-          if (colFolder != null && folderId) shCases.getRange(i + 2, colFolder + 1).setValue(folderId);
-          if (colStatus != null) shCases.getRange(i + 2, colStatus + 1).setValue('intake');
-          break;
-        }
-      }
-    }
-  } catch (_) {}
-
-  const resp = { ok: true, case_id: caseId, caseFolderReady: !!folderId };
+  // [LOG-6] ケースフォルダは intake 完了時にのみ作成する（ここでは作らない）
+  const resp = { ok: true, case_id: caseId, caseFolderReady: false };
   logCtx_('bootstrap:resp', resp);
   return bs_jsonResponse_(resp, 200);
 }

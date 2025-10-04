@@ -8,8 +8,9 @@ export const runtime = 'nodejs';
 const GAS_ENDPOINT = process.env.GAS_ENDPOINT!;
 const SECRET = process.env.BOOTSTRAP_SECRET ?? process.env.TOKEN_SECRET;
 
-function makePayload(lineId: string, caseId: string | undefined, tsMs: string) {
-  return [lineId, caseId ?? '', tsMs].join('|');
+function makePayload(lineId: string, caseId: string | undefined, ts: string) {
+  // ts は UNIX秒（文字列）である前提
+  return [lineId, caseId ?? '', ts].join('|');
 }
 function toB64Url(b64: string) {
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -40,8 +41,8 @@ export async function POST(req: NextRequest) {
     const { lineId, caseId } = await req.json();
     if (!lineId) return NextResponse.json({ ok: false, error: 'missing_lineId' }, { status: 400 });
 
-    // ts はミリ秒（文字列）
-    const ts = Date.now().toString();
+    // ts は UNIX秒（文字列）
+    const ts = Math.floor(Date.now() / 1000).toString();
     // payload = lineId|caseId|ts（初回は caseId を空でOK）
     const payload = makePayload(lineId, caseId, ts);
     const sig = hmacB64url(SECRET!, payload);

@@ -17,6 +17,9 @@ function getOriginSafe(): string {
   return process.env.NEXT_PUBLIC_BASE_URL || '';
 }
 
+// ts を常に「UNIX秒」で生成（呼び出し側の曖昧さを排除）
+export const tsSec = () => Math.floor(Date.now() / 1000).toString();
+
 type MakeFormUrlOptions = {
   redirectUrl?: string; // 例: https://app.example/done?formId=309542
   formId?: string; // 表示用（署名には使わない）
@@ -28,7 +31,7 @@ type MakeFormUrlOptions = {
  * その redirect_url を FormMailer 側の baseUrl にクエリで渡す。
  */
 export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opts: MakeFormUrlOptions = {}): string {
-  const ts = Date.now().toString();
+  const ts = tsSec(); // UNIX秒
   const payload = makePayload(lineId, caseId, ts);
   const sig = signV2(payload);
   const p = b64url(Buffer.from(payload, 'utf8').toString('base64'));
@@ -56,7 +59,7 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opt
  * intakeRedirect: intake 完了後に戻す /done のURL
  */
 export function makeIntakeUrl(intakeBase: string, intakeRedirect: string): string {
-  const ts = Date.now().toString();
+  const ts = tsSec(); // UNIX秒
   const lineId = '';
   const caseId = '';
   const payload = makePayload(lineId, caseId, ts);
@@ -67,6 +70,31 @@ export function makeIntakeUrl(intakeBase: string, intakeRedirect: string): strin
   redirect.searchParams.set('lineId', lineId);
   redirect.searchParams.set('caseId', caseId);
   redirect.searchParams.set('ts', ts);
+  redirect.searchParams.set('sig', sig);
+  redirect.searchParams.set('p', p);
+
+  const url = new URL(intakeBase);
+  url.searchParams.set('redirect_url', redirect.toString());
+  url.searchParams.set('referrer', getOriginSafe());
+  return url.toString();
+}
+
+// 新: intake 用の redirect_url を ts=秒固定で生成（lineId/caseId を明示指定可能）
+export function buildIntakeRedirectUrl(
+  intakeBase: string,
+  intakeRedirect: string,
+  lineId: string,
+  caseId: string
+): string {
+  const ts = tsSec();
+  const payload = makePayload(lineId || '', caseId || '', ts);
+  const sig = signV2(payload);
+  const p = b64url(Buffer.from(payload, 'utf8').toString('base64'));
+
+  const redirect = new URL(intakeRedirect);
+  redirect.searchParams.set('lineId', lineId || '');
+  redirect.searchParams.set('caseId', caseId || '');
+  redirect.searchParams.set('ts', ts); // 秒
   redirect.searchParams.set('sig', sig);
   redirect.searchParams.set('p', p);
 

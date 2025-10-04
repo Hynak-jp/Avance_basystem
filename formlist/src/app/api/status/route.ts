@@ -8,13 +8,6 @@ const SECRET = process.env.BOOTSTRAP_SECRET ?? process.env.TOKEN_SECRET;
 
 const b64u = (s: string) => s.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
-// V1: lineId|ts（status/intake_complete 用）
-function signV1(lineId: string, ts: string) {
-  const base = `${lineId}|${ts}`;
-  const b64 = crypto.createHmac('sha256', SECRET!).update(base, 'utf8').digest('base64');
-  return b64u(b64);
-}
-
 export async function GET(req: NextRequest) {
   try {
     if (!GAS || !SECRET) {
@@ -23,19 +16,23 @@ export async function GET(req: NextRequest) {
         { status: 500 }
       );
     }
-    const lineId = req.headers.get('x-line-id') || '';
+    const lineId = req.headers.get('x-line-id') ?? '';
+    const caseId = req.headers.get('x-case-id') ?? '';
     if (!lineId) return NextResponse.json({ ok: false, error: 'missing_lineId' }, { status: 400 });
 
-    const ts = Date.now().toString();
-    const sig = signV1(lineId, ts);
+    const ts = Math.floor(Date.now() / 1000).toString(); // UNIX 秒
+    // V2 payload: lineId|caseId|ts
+    const payload = `${lineId}|${caseId}|${ts}`;
+    const sig = b64u(crypto.createHmac('sha256', SECRET!).update(payload, 'utf8').digest('base64'));
+    const p = b64u(Buffer.from(payload, 'utf8').toString('base64'));
 
     const url = new URL(GAS);
     url.searchParams.set('action', 'status');
-    url.searchParams.set('lineId', lineId);
     url.searchParams.set('ts', ts);
     url.searchParams.set('sig', sig);
+    url.searchParams.set('p', p);
 
-    const r = await fetch(url.toString(), { method: 'POST', cache: 'no-store' });
+    const r = await fetch(url.toString(), { method: 'GET', redirect: 'follow', cache: 'no-store' });
     const text = await r.text();
     try {
       const json = JSON.parse(text);
