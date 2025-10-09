@@ -31,6 +31,9 @@ const SHEETS_REPO_SUBMISSIONS_HEADERS = [
   'received_at',
   'supersedes_seq',
   'json_path',
+  // 追加カラム（存在しなければ自動で増設）
+  'referrer',
+  'redirect_url',
 ];
 
 function sheetsRepo_aliases_(key) {
@@ -195,24 +198,27 @@ function getCaseForms_(caseId) {
 
 function getLastSeq_(caseId, form_key) {
   if (!caseId || !form_key) return 0;
+  const sheet = sheetsRepo_ensureSheet_(SHEETS_REPO_SUBMISSIONS, SHEETS_REPO_SUBMISSIONS_HEADERS);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 0;
+  const header = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  const idx = (typeof bs_toIndexMap_ === 'function') ? bs_toIndexMap_(header) : {};
+  const ci = idx['case_id'], fi = idx['form_key'], qi = idx['seq'];
+  if (!(fi >= 0 && qi >= 0)) return 0;
   const wantCase = String(caseId).trim();
   const wantForm = String(form_key).trim();
-  const rows = sheetsRepo_readAll_(SHEETS_REPO_SUBMISSIONS, SHEETS_REPO_SUBMISSIONS_HEADERS).filter(function (row) {
-    return (
-      String(sheetsRepo_getValue_(row, 'case_id') || '').trim() === wantCase &&
-      String(sheetsRepo_getValue_(row, 'form_key') || '').trim() === wantForm
-    );
-  });
-  if (!rows.length) return 0;
-  const seqs = rows
-    .map(function (row) {
-      return Number(row.seq || 0);
-    })
-    .filter(function (num) {
-      return Number.isFinite(num);
-    });
-  if (!seqs.length) return 0;
-  return Math.max.apply(null, seqs);
+  const rows = sheet.getRange(2, 1, lastRow - 1, header.length).getValues();
+  let max = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const okForm = String(row[fi] || '').trim() === wantForm;
+    const okCase = (ci == null) ? true : String(row[ci] || '').trim() === wantCase;
+    if (okForm && okCase) {
+      const n = Number(row[qi] || 0);
+      if (Number.isFinite(n) && n > max) max = n;
+    }
+  }
+  return max;
 }
 
 function insertSubmission_(row) {
@@ -232,6 +238,71 @@ function insertSubmission_(row) {
     return value !== undefined && value !== null ? value : '';
   });
   sheet.appendRow(ordered);
+}
+
+/** (submission_id, form_key) で upsert し、任意の追加カラムも反映 */
+function upsertSubmission_(row) {
+  const caseIdRaw = sheetsRepo_getValue_(row, 'case_id');
+  const formKeyRaw = sheetsRepo_getValue_(row, 'form_key');
+  const submissionIdRaw = sheetsRepo_getValue_(row, 'submission_id');
+  if (!caseIdRaw || !formKeyRaw || !submissionIdRaw) {
+    throw new Error('upsertSubmission_: missing case_id/form_key/submission_id');
+  }
+  const sheet = sheetsRepo_ensureSheet_(SHEETS_REPO_SUBMISSIONS, SHEETS_REPO_SUBMISSIONS_HEADERS);
+  // 足りない列を保証（列ズレ防止）
+  ensureSubmissionColumns_(sheet, [
+    'submission_id','form_key','case_id','user_key','line_id',
+    'submitted_at','seq','referrer','redirect_url','status','json_path','case_key','received_at','supersedes_seq'
+  ]);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(function(v){return String(v||'').trim();});
+  const idx = bs_toIndexMap_(headers);
+  const lastRow = sheet.getLastRow();
+  let foundRow = -1;
+  if (lastRow >= 2) {
+    const values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    for (let i = 0; i < values.length; i++) {
+      const r = values[i];
+      const fk  = String(r[idx['form_key']] || '').trim();
+      const sid = String(r[idx['submission_id']] || '').trim();
+      if (fk === String(formKeyRaw).trim() && sid === String(submissionIdRaw).trim()) {
+        foundRow = i + 2; // 1-based + header
+        break;
+      }
+    }
+  }
+  // 正規化（case_id/form_key は snake に揃える）
+  const normCaseId = (v) => (typeof bs_normCaseId_ === 'function') ? bs_normCaseId_(v) : String(v||'').replace(/\D/g,'').padStart(4,'0');
+  const normalized = Object.assign({}, row, {
+    case_id: normCaseId(caseIdRaw),
+    form_key: String(formKeyRaw).trim(),
+    submission_id: String(submissionIdRaw).trim(),
+  });
+  if (foundRow > 0) {
+    const current = sheet.getRange(foundRow, 1, 1, headers.length).getValues()[0];
+    headers.forEach(function (key, colIdx) {
+      const val = sheetsRepo_getValue_(normalized, key);
+      if (val != null) current[colIdx] = val;
+    });
+    sheet.getRange(foundRow, 1, 1, headers.length).setValues([current]);
+  } else {
+    const ordered = headers.map(function (key) {
+      const value = sheetsRepo_getValue_(normalized, key);
+      return value !== undefined && value !== null ? value : '';
+    });
+    sheet.appendRow(ordered);
+  }
+}
+
+function ensureSubmissionColumns_(sheet, needed) {
+  const lastCol = Math.max(sheet.getLastColumn(), 1);
+  const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function(s){return String(s||'').trim();});
+  const have = new Set(header.filter(Boolean));
+  const add = (needed || []).filter(function(k){ return !have.has(String(k).trim()); });
+  if (add.length) {
+    sheet.insertColumnsAfter(header.length || 1, add.length);
+    const merged = header.concat(add);
+    sheet.getRange(1, 1, 1, merged.length).setValues([merged]);
+  }
 }
 
 function lookupCaseIdByLineId_(lineId) {

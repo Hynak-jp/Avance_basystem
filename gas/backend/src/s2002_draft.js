@@ -16,60 +16,15 @@ const S2002_LABEL_PROCESSED = 'FormAttach/Processed';
  * ラベル: FormAttach/ToProcess → 処理後に FormAttach/Processed を付与
  */
 function run_ProcessInbox_S2002() {
-  const query = `label:${S2002_LABEL_TO_PROCESS} subject:#FM-BAS subject:S2002`;
-  const threads = GmailApp.search(query, 0, 50);
+  // レガシー実行は共通ルーターへ委譲（Queue → ルーターの一括処理）
+  try { Logger.log('[S2002] delegate to common router (run_ProcessInbox_AllForms)'); } catch (_) {}
   try {
-    Logger.log('[S2002] tick: query=%s threads=%s', query, threads.length);
-  } catch (_) {}
-  if (!threads.length) return;
-
-  threads.forEach((th) => {
-    const msgs = th.getMessages();
-    msgs.forEach((msg) => {
-      try {
-        const body = msg.getPlainBody() || HtmlService.createHtmlOutput(msg.getBody()).getContent();
-        const subject = msg.getSubject();
-        const parsed = parseFormMail_(subject, body);
-
-        if (parsed.meta.form_key !== 's2002_userform') return; // S2002のみ処理
-
-        // cases解決（caseId→caseKey/folderId取得）
-        const caseInfo = resolveCaseByCaseId_(parsed.meta.case_id);
-        if (!caseInfo) throw new Error(`Unknown case_id: ${parsed.meta.case_id}`);
-        // folderId が未設定/URL等なら補正（caseKey から検索/作成）
-        caseInfo.folderId = ensureCaseFolderId_(caseInfo);
-
-        // 1) JSON保存（<caseFolder> 直下に保存）
-        saveSubmissionJson_(caseInfo.folderId, parsed);
-
-        // 2) S2002 ドラフト生成（gdocコピー→差し込み→drafts保存）
-        const draft = generateS2002Draft_(caseInfo, parsed);
-        try {
-          Logger.log(
-            '[S2002] draft created: caseId=%s url=%s',
-            parsed.meta.case_id,
-            draft && draft.draftUrl
-          );
-        } catch (_) {}
-
-        // 3) ステータス更新
-        updateCasesRow_(parsed.meta.case_id, {
-          status: 'draft',
-          last_activity: new Date(),
-          last_draft_url: draft.draftUrl,
-        });
-
-        // ラベル付替え
-        msg.addLabel(GmailApp.getUserLabelByName(S2002_LABEL_PROCESSED));
-        msg.removeLabel(GmailApp.getUserLabelByName(S2002_LABEL_TO_PROCESS));
-      } catch (e) {
-        // 失敗時はスレッドにノートを残す
-        GmailApp.createDraft(msg.getFrom(), '[BAS Intake Error]', String(e), {
-          htmlBody: `<pre>${safeHtml(e.stack || e)}</pre>`,
-        });
-      }
-    });
-  });
+    if (typeof run_ProcessInbox_AllForms === 'function') {
+      run_ProcessInbox_AllForms();
+    }
+  } catch (e) {
+    try { Logger.log('[S2002] delegation error: %s', (e && e.stack) || e); } catch (_) {}
+  }
 }
 
 /** ====== 既存JSON→ドラフト生成ユーティリティ ====== **/
@@ -721,9 +676,29 @@ function updateCasesRow_(caseId, patch) {
   const header = vals[0];
   const idxMap = bs_toIndexMap_(header);
   const idxCase = idxMap.case_id;
-  if (!(idxCase >= 0)) return;
-  const want = normalizeCaseIdString_(caseId);
-  const rowIdx = vals.findIndex((r, i) => i > 0 && normalizeCaseIdString_(r[idxCase]) === want);
+  const idxKey  = idxMap.case_key;
+  const idxLine = idxMap.line_id;
+  // 列書式: case_id をテキスト('@')に固定（数値化防止）
+  try {
+    if (idxCase >= 0) sh.getRange(1, idxCase + 1, sh.getMaxRows(), 1).setNumberFormat('@');
+  } catch (_) {}
+
+  const wantCid = normalizeCaseIdString_(caseId);
+  let rowIdx = -1;
+  // 1) case_key 一致優先
+  if (idxKey >= 0 && patch && patch.case_key) {
+    const wantKey = String(patch.case_key || '').trim();
+    rowIdx = vals.findIndex((r, i) => i > 0 && String(r[idxKey] || '').trim() === wantKey);
+  }
+  // 2) case_id 一致
+  if (rowIdx < 0 && idxCase >= 0) {
+    rowIdx = vals.findIndex((r, i) => i > 0 && normalizeCaseIdString_(r[idxCase]) === wantCid);
+  }
+  // 3) line_id 一致
+  if (rowIdx < 0 && idxLine >= 0 && patch && patch.line_id) {
+    const wantLine = String(patch.line_id || '').trim();
+    rowIdx = vals.findIndex((r, i) => i > 0 && String(r[idxLine] || '').trim() === wantLine);
+  }
   if (rowIdx < 1) return;
   const r = rowIdx + 1;
   Object.keys(patch).forEach((k) => {
@@ -740,6 +715,8 @@ function updateCasesRow_(caseId, patch) {
     }
     if (c >= 0) sh.getRange(r, c + 1).setValue(patch[k]);
   });
+  // case_id の正規化書き戻し
+  if (idxCase >= 0) sh.getRange(r, idxCase + 1).setValue(wantCid);
 }
 
 function saveSubmissionJson_(caseFolderId, parsed) {
@@ -765,6 +742,9 @@ function getOrCreateSubfolder_(parent, name) {
  * @returns {string} 正常な Drive フォルダID
  */
 function ensureCaseFolderId_(caseInfo) {
+  function isValidCaseKey_(s) {
+    return /^[a-z0-9]{2,6}-\d{4}$/.test(String(s || ''));
+  }
   // 1) 既存 folderId を URL→ID 抽出して試す
   const norm = extractDriveIdMaybe_(caseInfo.folderId || '');
   if (norm) {
@@ -794,18 +774,29 @@ function ensureCaseFolderId_(caseInfo) {
     }
   }
 
-  // 2) caseKey から Drive ルート直下で検索/作成
+  // 2) caseKey から Drive ルート直下で検索/作成（妥当性チェックを追加）
   const ROOT_ID =
-    props.getProperty('DRIVE_ROOT_FOLDER_ID') || props.getProperty('ROOT_FOLDER_ID') || '';
+    PROP_S2002.getProperty('DRIVE_ROOT_FOLDER_ID') ||
+    PROP_S2002.getProperty('ROOT_FOLDER_ID') || '';
   if (!ROOT_ID) throw new Error('ROOT_FOLDER_ID/DRIVE_ROOT_FOLDER_ID が未設定です');
   const root = DriveApp.getFolderById(ROOT_ID);
-  let name = caseInfo.caseKey || '';
+  let name = String(caseInfo.caseKey || '').trim();
   if (!name) {
     // cases に caseKey 列が無い場合は lineId+caseId から推定（userKey = lineId 先頭6文字）
     const lid = String(caseInfo.lineId || '').trim();
     const cid = normalizeCaseIdString_(caseInfo.caseId || '');
     const userKey = lid ? lid.slice(0, 6).toLowerCase() : '';
     if (userKey && cid) name = userKey + '-' + cid;
+  }
+  // 妥当な case_key 以外は拒否して再生成
+  if (!isValidCaseKey_(name)) {
+    const lid = String(caseInfo.lineId || '').trim();
+    const cid = normalizeCaseIdString_(caseInfo.caseId || '');
+    const uk = lid ? lid.slice(0, 6).toLowerCase() : '';
+    if (uk && cid) name = uk + '-' + cid;
+  }
+  if (!isValidCaseKey_(name)) {
+    throw new Error('case_key を生成できません（line_id または case_id が不足）');
   }
   if (!name)
     throw new Error(
@@ -814,7 +805,7 @@ function ensureCaseFolderId_(caseInfo) {
   // 重複フォルダが複数存在する可能性があるため、内容がある方を優先
   const best = findBestCaseFolderUnderRoot_(name);
   const id = best ? best.id : root.createFolder(name).getId();
-  // folderId は必ず書き戻し。caseKey 列が存在すれば caseKey も書き戻される（無ければスキップ）。
+  // folderId は必ず書き戻し。正しい case_key も書き戻す。
   updateCasesRow_(caseInfo.caseId, { folder_id: id, case_key: name });
   return id;
 }
@@ -843,7 +834,7 @@ function extractDriveIdMaybe_(v) {
 function findBestCaseFolderUnderRoot_(name, preferId) {
   if (!name) return null;
   const ROOT_ID =
-    props.getProperty('DRIVE_ROOT_FOLDER_ID') || props.getProperty('ROOT_FOLDER_ID') || '';
+    PROP_S2002.getProperty('DRIVE_ROOT_FOLDER_ID') || PROP_S2002.getProperty('ROOT_FOLDER_ID') || '';
   if (!ROOT_ID) return null;
   const root = DriveApp.getFolderById(ROOT_ID);
   const it = root.getFoldersByName(name);
