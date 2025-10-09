@@ -19,6 +19,11 @@ const normalizeCaseId = (raw: string) => {
   if (!onlyDigits) return '';
   return onlyDigits.padStart(4, '0');
 };
+const toIdx0 = (name?: string) => (name ? (/\[\d+\]$/.test(name) ? name : `${name}[0]`) : undefined);
+const assertNoLegacyParams = (u: URL) => {
+  const bad = ['case_id', 'line_id', 'redirect_url', 'referrer'].filter((k) => u.searchParams.has(k));
+  if (bad.length) throw new Error(`FormMailer baseUrl must not contain plain params: ${bad.join(', ')}`);
+};
 
 // 追加: originの安全取得（SSR/Edge/Browser全部OK）
 export function getOriginSafe(): string | undefined {
@@ -74,18 +79,19 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opt
 
   // 2) FormMailer 側のURLに、redirect_url を渡す
   const url = safeURL(baseUrl, origin);
-  const lineIdQueryKeys = opts.lineIdQueryKeys !== undefined ? opts.lineIdQueryKeys : ['line_id[0]'];
-  const caseIdQueryKeys = opts.caseIdQueryKeys !== undefined ? opts.caseIdQueryKeys : ['case_id[0]'];
-  const redirectUrlQueryKey = opts.redirectUrlQueryKey ?? 'redirect_url[0]';
-  const referrerQueryKey = opts.referrerQueryKey ?? 'referrer[0]';
-  lineIdQueryKeys.forEach((key) => {
-    if (key) url.searchParams.set(key, lineId);
+  assertNoLegacyParams(url);
+  const lineIdKeys = (opts.lineIdQueryKeys ?? ['line_id']).map(toIdx0).filter((k): k is string => Boolean(k));
+  const caseIdKeys = (opts.caseIdQueryKeys ?? ['case_id']).map(toIdx0).filter((k): k is string => Boolean(k));
+  const redirectKey = toIdx0(opts.redirectUrlQueryKey ?? 'redirect_url');
+  const referrerKey = toIdx0(opts.referrerQueryKey ?? 'referrer');
+  lineIdKeys.forEach((key) => {
+    if (lineId) url.searchParams.set(key, lineId);
   });
-  caseIdQueryKeys.forEach((key) => {
-    if (key && normalizedCaseId) url.searchParams.set(key, normalizedCaseId);
+  caseIdKeys.forEach((key) => {
+    if (normalizedCaseId) url.searchParams.set(key, normalizedCaseId);
   });
-  if (redirectUrlQueryKey) url.searchParams.set(redirectUrlQueryKey, redirect.toString());
-  if (referrerQueryKey) url.searchParams.set(referrerQueryKey, origin ?? '');
+  if (redirectKey) url.searchParams.set(redirectKey, redirect.toString());
+  if (referrerKey) url.searchParams.set(referrerKey, origin ?? '');
   return url.toString();
 }
 
@@ -121,14 +127,15 @@ export function makeIntakeUrl(
   if (opts.formId) redirect.searchParams.set('formId', opts.formId);
 
   const url = safeURL(intakeBase, origin);
-  const lineIdQueryKeys = opts.lineIdQueryKeys !== undefined ? opts.lineIdQueryKeys : ['line_id[0]'];
-  const redirectUrlQueryKey = opts.redirectUrlQueryKey ?? 'redirect_url[0]';
-  const referrerQueryKey = opts.referrerQueryKey ?? 'referrer[0]';
-  lineIdQueryKeys.forEach((key) => {
-    if (key && lineId) url.searchParams.set(key, lineId);
+  assertNoLegacyParams(url);
+  const lineIdKeys = (opts.lineIdQueryKeys ?? ['line_id']).map(toIdx0).filter((k): k is string => Boolean(k));
+  const redirectKey = toIdx0(opts.redirectUrlQueryKey ?? 'redirect_url');
+  const referrerKey = toIdx0(opts.referrerQueryKey ?? 'referrer');
+  lineIdKeys.forEach((key) => {
+    if (lineId) url.searchParams.set(key, lineId);
   });
-  if (redirectUrlQueryKey) url.searchParams.set(redirectUrlQueryKey, redirect.toString());
-  if (referrerQueryKey) url.searchParams.set(referrerQueryKey, origin ?? '');
+  if (redirectKey) url.searchParams.set(redirectKey, redirect.toString());
+  if (referrerKey) url.searchParams.set(referrerKey, origin ?? '');
   return url.toString();
 }
 
