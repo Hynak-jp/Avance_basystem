@@ -7,6 +7,8 @@
  */
 
 const STATUS_API_PROPS = PropertiesService.getScriptProperties();
+var STATUS_API_CASES_CASE_ID_FORMATTED = false;
+var STATUS_API_SUBMISSIONS_CASE_ID_FORMATTED = false;
 const STATUS_API_SECRET =
   STATUS_API_PROPS.getProperty('HMAC_SECRET') ||
   STATUS_API_PROPS.getProperty('BAS_API_HMAC_SECRET') ||
@@ -15,10 +17,126 @@ const STATUS_API_NONCE_WINDOW_SECONDS = 600; // 10 分
 
 // === case_id 正規化（"0001" など4桁固定、常に文字列） ===
 function statusApi_normCaseId_(v) {
-  var s = String(v == null ? '' : v).trim();
-  // "1" や 1 → "0001"、既にゼロ埋めならそのまま
-  if (/^\d+$/.test(s)) s = ('0000' + s).slice(-4);
-  return s;
+  return normalizeCaseId_(v);
+}
+
+function statusApi_formsFromSubmissions_(caseId) {
+  try {
+    if (!caseId || typeof bs_getSheet_ !== 'function') return [];
+    var sheetName = typeof SHEETS_REPO_SUBMISSIONS !== 'undefined' && SHEETS_REPO_SUBMISSIONS
+      ? SHEETS_REPO_SUBMISSIONS
+      : 'submissions';
+    var sh = bs_getSheet_(sheetName);
+    if (!sh) return [];
+    var lastRow = sh.getLastRow();
+    if (lastRow < 2) return [];
+    var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(function (v) {
+      return String(v || '').trim();
+    });
+    var idx = typeof bs_toIndexMap_ === 'function' ? bs_toIndexMap_(headers) : {};
+    var ci = idx['case_id'] != null ? idx['case_id'] : idx['caseId'];
+    var fi = idx['form_key'] != null ? idx['form_key'] : idx['formKey'];
+    if (!(ci >= 0 && fi >= 0)) return [];
+    var seqIdx = idx['seq'] != null ? idx['seq'] : idx['Seq'];
+    var caseKeyIdx = idx['case_key'] != null ? idx['case_key'] : idx['caseKey'];
+    var statusIdx = idx['status'] != null ? idx['status'] : idx['Status'];
+    var reopenAtIdx = idx['reopened_at'] != null ? idx['reopened_at'] : idx['reopenedAt'];
+    var reopenUntilIdx = idx['reopen_until'] != null ? idx['reopen_until'] : idx['reopenUntil'];
+    var lockedReasonIdx = idx['locked_reason'] != null ? idx['locked_reason'] : idx['lockedReason'];
+    var reopenedByIdx = idx['reopened_by'] != null ? idx['reopened_by'] : idx['reopenedBy'];
+    var canEditIdx = idx['can_edit'] != null ? idx['can_edit'] : idx['canEdit'];
+    var reopenAtEpochIdx = idx['reopened_at_epoch'] != null ? idx['reopened_at_epoch'] : idx['reopenedAtEpoch'];
+    var reopenUntilEpochIdx = idx['reopen_until_epoch'] != null ? idx['reopen_until_epoch'] : idx['reopenUntilEpoch'];
+    var rows = sh.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    var want = statusApi_normCaseId_(caseId);
+    var map = Object.create(null);
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var rowCase = statusApi_normCaseId_(row[ci]);
+      if (!rowCase || rowCase !== want) continue;
+      var formKey = String(row[fi] || '').trim();
+      if (!formKey) continue;
+      var seq = seqIdx != null ? Number(row[seqIdx] || 0) || 0 : 0;
+      var status = statusIdx != null ? String(row[statusIdx] || '').trim() : '';
+      if (!status || status.toLowerCase() === formKey.toLowerCase()) status = 'submitted';
+      else if (status.toLowerCase() === 'received') status = 'submitted';
+      var reopenedAtEpoch = null;
+      if (reopenAtEpochIdx != null && reopenAtEpochIdx >= 0) {
+        var rawEpoch = Number(row[reopenAtEpochIdx]);
+        if (Number.isFinite(rawEpoch) && rawEpoch > 0) reopenedAtEpoch = Math.floor(rawEpoch);
+      }
+      var reopenUntilEpoch = null;
+      if (reopenUntilEpochIdx != null && reopenUntilEpochIdx >= 0) {
+        var rawUntilEpoch = Number(row[reopenUntilEpochIdx]);
+        if (Number.isFinite(rawUntilEpoch) && rawUntilEpoch > 0) reopenUntilEpoch = Math.floor(rawUntilEpoch);
+      }
+      var reopenedAt = reopenAtIdx != null ? String(row[reopenAtIdx] || '').trim() : '';
+      var reopenUntil = reopenUntilIdx != null ? String(row[reopenUntilIdx] || '').trim() : '';
+      var lockedReason = lockedReasonIdx != null ? String(row[lockedReasonIdx] || '').trim() : '';
+      var reopenedBy = reopenedByIdx != null ? String(row[reopenedByIdx] || '').trim() : '';
+      var canEdit = canEditIdx != null ? statusApi_normalizeBool_(row[canEditIdx]) : status.toLowerCase() === 'reopened';
+      var caseKeyValue = caseKeyIdx != null ? String(row[caseKeyIdx] || '').trim() : '';
+      if (reopenedAtEpoch == null && reopenedAt) {
+        var parsedReopened = Date.parse(reopenedAt);
+        if (Number.isFinite(parsedReopened)) reopenedAtEpoch = Math.floor(parsedReopened / 1000);
+      }
+      if (reopenUntilEpoch == null && reopenUntil) {
+        var parsedReopenUntil = Date.parse(reopenUntil);
+        if (Number.isFinite(parsedReopenUntil)) reopenUntilEpoch = Math.floor(parsedReopenUntil / 1000);
+      }
+      var existing = map[formKey];
+      if (!existing || seq >= existing._seq) {
+        map[formKey] = {
+          case_id: want,
+          form_key: formKey,
+          case_key: caseKeyValue,
+          status: status,
+          can_edit: canEdit,
+          reopened_at: reopenedAt || null,
+          reopen_until: reopenUntil || null,
+          locked_reason: lockedReason || null,
+          reopened_by: reopenedBy || null,
+          reopened_at_epoch: reopenedAtEpoch,
+          reopen_until_epoch: reopenUntilEpoch,
+          last_seq: seq,
+          _seq: seq,
+        };
+      }
+    }
+    var keys = Object.keys(map);
+    if (typeof getLastSeq_ === 'function') {
+      keys.forEach(function (key) {
+        var item = map[key];
+        if (!item) return;
+        if (!(item.last_seq > 0)) {
+          try { item.last_seq = Number(getLastSeq_(item.case_id, key)) || 0; } catch (_) {}
+        }
+      });
+    }
+    return keys.map(function (key) {
+      var item = map[key];
+      if (!item) {
+        return {
+          case_id: statusApi_normCaseId_(caseId),
+          form_key: key,
+          case_key: '',
+          status: '',
+          can_edit: false,
+          reopened_at: null,
+          reopen_until: null,
+          locked_reason: null,
+          reopened_by: null,
+          reopened_at_epoch: null,
+          reopen_until_epoch: null,
+          last_seq: 0,
+        };
+      }
+      delete item._seq;
+      return item;
+    });
+  } catch (_) {
+    return [];
+  }
 }
 
 // contacts.active_case_id を "0001" 文字列で強制保存（数値化防止）
@@ -251,12 +369,6 @@ function submissions_headerIndexMap_(headers) {
   return m;
 }
 
-function padCaseId4_(v) {
-  var s = String(v == null ? '' : v).trim();
-  if (/^\d+$/.test(s)) s = ('0000' + s).slice(-4);
-  return s;
-}
-
 function submissions_appendRow(obj) {
   var props = PropertiesService.getScriptProperties();
   var sid = props.getProperty('BAS_MASTER_SPREADSHEET_ID') || props.getProperty('SHEET_ID');
@@ -279,18 +391,40 @@ function submissions_appendRow(obj) {
     return;
   }
 
+  var meta = obj && typeof obj.meta === 'object' ? obj.meta : {};
+  var rawLineId = obj.line_id || meta.line_id || '';
+  var lineId = String(rawLineId || '').trim();
+  var inferredUserKey = '';
+  try {
+    if (!obj.user_key && !meta.user_key && lineId && typeof drive_userKeyFromLineId_ === 'function') {
+      inferredUserKey = drive_userKeyFromLineId_(lineId) || '';
+    }
+  } catch (_) {}
+  var userKey = normalizeUserKey_(obj.user_key || meta.user_key || inferredUserKey || '');
+  var caseId = normalizeCaseId_(obj.case_id || meta.case_id || '');
+  var caseKey = obj.case_key || meta.case_key || (userKey && caseId ? userKey + '-' + caseId : '');
+  if (meta) {
+    if (lineId && !meta.line_id) meta.line_id = lineId;
+    meta.user_key = userKey;
+    meta.case_id = caseId;
+    if (caseKey) meta.case_key = caseKey;
+    obj.meta = meta;
+  }
+
   var row = new Array(headers.length).fill('');
   var payload = {
     submission_id: obj.submission_id || '',
     form_key: obj.form_key || '',
-    case_id: padCaseId4_(obj.case_id || ''),
-    user_key: obj.user_key || '',
-    line_id: obj.line_id || '',
+    case_id: caseId,
+    user_key: userKey,
+    line_id: lineId,
     submitted_at: obj.submitted_at || new Date().toISOString(),
     seq: obj.seq || '',
     referrer: obj.referrer || '',
     redirect_url: obj.redirect_url || '',
     status: obj.status || 'received',
+    case_key: caseKey,
+    json_path: obj.json_path || '',
   };
 
   Object.keys(payload).forEach(function (k) {
@@ -411,6 +545,8 @@ function statusApi_collectStaging_(lineId, caseId) {
     var moved = 0; // staging からの移送件数
     var attachReason = ''; // フェイルセーフ時の一致理由（line_id|email|case_id|case_key）
     var foundNames = [];
+    var ensureProp = (STATUS_API_PROPS.getProperty('ALLOW_GET_ENSURE_CASE_FOLDER') || '').trim();
+    var allowGetEnsure = ensureProp ? ensureProp === '1' : false;
     // userKey → 既存ケースフォルダの解決（作成はしない）
     var uk = '';
     try {
@@ -547,66 +683,68 @@ function statusApi_collectStaging_(lineId, caseId) {
       } catch (_) {}
 
       if (foundForThis) {
-        try {
-          // 限定 ensure: intake が本人のものと断定できた時だけ getOrCreate 可
-          // - file.case_key が正ならそれを優先
-          // - それが無ければ、file.case_id と ukey から生成
-          var ensureKey = '';
-          var validCaseKey = function (s) { s = String(s || '').trim(); return !!s && /^[a-z0-9]{2,}-\d{4}$/i.test(s); };
-          var fileCIDn = statusApi_normCaseId_(String((foundForThis && foundForThis.fileCID) || ''));
-          if (validCaseKey(foundForThis && foundForThis.fileCKey)) {
-            ensureKey = foundForThis.fileCKey;
-          } else if (uk && fileCIDn) {
-            ensureKey = uk + '-' + fileCIDn;
-          }
-          // "-0001" など不正キーは使わない
-          if (!validCaseKey(ensureKey)) return;
-          var cf = drive_getOrCreateCaseFolderByKey_(ensureKey);
-          var caseFolder = (cf && typeof cf.getId === 'function') ? cf : DriveApp.getFolderById(String(cf));
-          folderId = caseFolder.getId();
-          // ファイルを案件直下へコピー（原本は削除）
+        if (!allowGetEnsure) {
+          try { Logger.log('[collectStaging] ensure skipped by policy (ALLOW_GET_ENSURE_CASE_FOLDER=0) lid=%s cid=%s', lid, cid); } catch (_) {}
+          return;
+        } else {
           try {
-            try { Logger.log('[collectStaging] move name=%s by=%s → folderId=%s', foundForThis.name || '', attachReason || '', String(folderId)); } catch (_) {}
-            caseFolder.createFile(foundForThis.file.getBlob());
-            try { foundForThis.file.setTrashed(true); } catch (_) {}
-          } catch (_) {}
-          try { moved++; } catch (_) {}
-          // submissions upsert（重複ガード）
-          try {
-            var nm2 = foundForThis.name;
-            var subId = nm2 ? extractSubmissionId_(nm2) : '';
-            if (subId && typeof upsertSubmission_ === 'function') {
-              var ensuredCid = (ensureKey.match(/-(\d{4})$/) || [])[1] || cid;
-              var normEnsuredCid = statusApi_normCaseId_(ensuredCid);
-              var nextSeq2 = 1;
-              try { nextSeq2 = (getLastSeq_(normEnsuredCid, 'intake') | 0) + 1; } catch (_) { nextSeq2 = 1; }
-              upsertSubmission_({
-                submission_id: subId,
-                form_key: 'intake',
-                case_id: normEnsuredCid,
-                user_key: uk,
-                line_id: lid,
-                submitted_at: new Date().toISOString(),
-                status: 'intake',
-                seq: nextSeq2,
-                referrer: nm2 || '',
-                redirect_url: '',
-              });
-              try { appended++; } catch (_) {}
+            // 限定 ensure: intake が本人のものと断定できた時だけ getOrCreate 可
+            // - file.case_key が正ならそれを優先
+            // - それが無ければ、file.case_id と ukey から生成
+            var ensureKey = '';
+            var validCaseKey = function (s) { s = String(s || '').trim(); return !!s && /^[a-z0-9]{2,}-\d{4}$/i.test(s); };
+            var fileCIDn = statusApi_normCaseId_(String((foundForThis && foundForThis.fileCID) || ''));
+            if (validCaseKey(foundForThis && foundForThis.fileCKey)) {
+              ensureKey = foundForThis.fileCKey;
+            } else if (uk && fileCIDn) {
+              ensureKey = uk + '-' + fileCIDn;
             }
-            if (typeof upsertCasesForms_ === 'function') {
-              upsertCasesForms_({ case_id: (ensureKey.match(/-(\d{4})$/) || [])[1] || cid, form_key: 'intake', status: 'received', can_edit: false });
-            }
-          } catch (_) {}
-          // 限定ensureによりフォルダを起こした直後に、contacts/cases も揃える
-          try { statusApi_ensureActiveCaseIdString_(lid, (ensureKey.match(/-(\d{4})$/) || [])[1] || cid); } catch (_) {}
-          if (typeof updateCasesRow_ === 'function') {
+            // "-0001" など不正キーは使わない
+            if (!validCaseKey(ensureKey)) return;
+            var cf = drive_getOrCreateCaseFolderByKey_(ensureKey);
+            var caseFolder = (cf && typeof cf.getId === 'function') ? cf : DriveApp.getFolderById(String(cf));
+            folderId = caseFolder.getId();
+            // ファイルを案件直下へコピー（原本は削除）
             try {
-              var cidEnsured = (ensureKey.match(/-(\d{4})$/) || [])[1] || cid;
-              updateCasesRow_(cidEnsured, { case_key: ensureKey, folder_id: folderId, status: 'intake', updated_at: new Date() });
+              try { Logger.log('[collectStaging] move name=%s by=%s → folderId=%s', foundForThis.name || '', attachReason || '', String(folderId)); } catch (_) {}
+              caseFolder.createFile(foundForThis.file.getBlob());
+              try { foundForThis.file.setTrashed(true); } catch (_) {}
             } catch (_) {}
-          }
-        } catch (_) {}
+            try { moved++; } catch (_) {}
+            // submissions upsert（重複ガード）
+            try {
+              var nm2 = foundForThis.name;
+              var subId = nm2 ? extractSubmissionId_(nm2) : '';
+              if (subId && typeof upsertSubmission_ === 'function') {
+                var ensuredCid = (ensureKey.match(/-(\d{4})$/) || [])[1] || cid;
+                var normEnsuredCid = statusApi_normCaseId_(ensuredCid);
+                var nextSeq2 = 1;
+                try { nextSeq2 = (getLastSeq_(normEnsuredCid, 'intake') | 0) + 1; } catch (_) { nextSeq2 = 1; }
+                upsertSubmission_({
+                  submission_id: subId,
+                  form_key: 'intake',
+                  case_id: normEnsuredCid,
+                  user_key: uk,
+                  line_id: lid,
+                  submitted_at: new Date().toISOString(),
+                  status: 'intake',
+                  seq: nextSeq2,
+                  referrer: nm2 || '',
+                  redirect_url: '',
+                });
+                try { appended++; } catch (_) {}
+              }
+            } catch (_) {}
+            // 限定ensureによりフォルダを起こした直後に、contacts/cases も揃える
+            try { statusApi_ensureActiveCaseIdString_(lid, (ensureKey.match(/-(\d{4})$/) || [])[1] || cid); } catch (_) {}
+            if (typeof updateCasesRow_ === 'function') {
+              try {
+                var cidEnsured = (ensureKey.match(/-(\d{4})$/) || [])[1] || cid;
+                updateCasesRow_(cidEnsured, { case_key: ensureKey, folder_id: folderId, status: 'intake', updated_at: new Date() });
+              } catch (_) {}
+            }
+          } catch (_) {}
+        }
       } else {
         // intake がまだ無ければ、ここでは何もしない（フォルダも作らない）
         try { Logger.log('[collectStaging] no intake json for lid=%s, skip ensure', lid); } catch (_) {}
@@ -695,18 +833,6 @@ function statusApi_collectStaging_(lineId, caseId) {
               referrer: nm,
               redirect_url: '',
             });
-            // 任意：cases_forms の整合を補完（進捗一覧の安定化）
-            try {
-              if (typeof upsertCasesForms_ === 'function') {
-                upsertCasesForms_({
-                  case_id: cid,
-                  form_key: 'intake',
-                  status: 'received',
-                  can_edit: false,
-                  updated_at: new Date().toISOString(),
-                });
-              }
-            } catch (_) {}
             try { appended++; } catch (_) {}
           }
         }
@@ -801,8 +927,10 @@ function statusApi_collectStaging_(lineId, caseId) {
             if (!okAttach) return; // 救済しない
             var folderIdFS = '';
             try {
-              if (typeof resolveCaseFolderId_ === 'function') {
+              if (allowGetEnsure && typeof resolveCaseFolderId_ === 'function') {
                 folderIdFS = resolveCaseFolderId_(lid, cid4, /*createIfMissing=*/true);
+              } else if (!allowGetEnsure) {
+                try { Logger.log('[collectStaging] resolveCaseFolderId_ skipped by policy for lid=%s cid=%s', lid, cid4); } catch (_) {}
               }
             } catch (_) {}
             if (folderIdFS) {
@@ -843,9 +971,6 @@ function statusApi_collectStaging_(lineId, caseId) {
                     });
                     appended++;
                   }
-                }
-                if (typeof upsertCasesForms_ === 'function') {
-                  upsertCasesForms_({ case_id: cid4, form_key: 'intake', status: 'received', can_edit: false });
                 }
               } catch (_) {}
             }
@@ -900,8 +1025,10 @@ function statusApi_routeStatus_(lineIdRaw, caseIdHintRaw) {
     if (caseId) statusApi_ensureActiveCaseIdString_(lineId, caseId);
     // cases.case_id の列書式を固定
     ensureCasesCaseIdTextFormat_();
+    ensureSubmissionsCaseIdTextFormat_();
     // staging 吸い上げ + submissions 補填
-    statusApi_collectStaging_(lineId, caseId || '');
+    var allowSweep = (STATUS_API_PROPS.getProperty('ALLOW_STAGING_SWEEP_ON_STATUS') || '').trim() === '1';
+    if (allowSweep) statusApi_collectStaging_(lineId, caseId || '');
 
     try {
       if (typeof logCtx_ === 'function') logCtx_('status:route:common', { lineId: lineId, caseId: caseId });
@@ -917,15 +1044,68 @@ function statusApi_routeStatus_(lineIdRaw, caseIdHintRaw) {
 // cases.case_id 列をテキスト('@')に固定（数値化防止）
 function ensureCasesCaseIdTextFormat_() {
   try {
+    if (STATUS_API_CASES_CASE_ID_FORMATTED) return;
+    var prop = (STATUS_API_PROPS.getProperty('CASES_CASE_ID_FORMATTED') || '').trim();
+    if (prop === '1') {
+      STATUS_API_CASES_CASE_ID_FORMATTED = true;
+      return;
+    }
     var props = PropertiesService.getScriptProperties();
     var sid = props.getProperty('BAS_MASTER_SPREADSHEET_ID') || props.getProperty('SHEET_ID');
     if (!sid) return;
     var ss = SpreadsheetApp.openById(sid);
     var sh = ss.getSheetByName('cases');
     if (!sh) return;
-    var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
-    var col = headers.indexOf('case_id') + 1;
-    if (col > 0) sh.getRange(1, col, sh.getMaxRows(), 1).setNumberFormat('@');
+    var headers = sh.getRange(1, 1, 1, Math.max(1, sh.getLastColumn())).getValues()[0];
+    var col = -1;
+    for (var i = 0; i < headers.length; i++) {
+      var h = String(headers[i] || '').trim();
+      if (!h) continue;
+      var low = h.toLowerCase();
+      if (low === 'case_id' || low === 'caseid') {
+        col = i + 1;
+        break;
+      }
+    }
+    if (col > 0) {
+      sh.getRange(1, col, sh.getMaxRows(), 1).setNumberFormat('@');
+      STATUS_API_CASES_CASE_ID_FORMATTED = true;
+      STATUS_API_PROPS.setProperty('CASES_CASE_ID_FORMATTED', '1');
+    }
+  } catch (_) {}
+}
+
+function ensureSubmissionsCaseIdTextFormat_() {
+  try {
+    if (STATUS_API_SUBMISSIONS_CASE_ID_FORMATTED) return;
+    var prop = (STATUS_API_PROPS.getProperty('SUBMISSIONS_CASE_ID_FORMATTED') || '').trim();
+    if (prop === '1') {
+      STATUS_API_SUBMISSIONS_CASE_ID_FORMATTED = true;
+      return;
+    }
+    var props = PropertiesService.getScriptProperties();
+    var sid = props.getProperty('BAS_MASTER_SPREADSHEET_ID') || props.getProperty('SHEET_ID');
+    if (!sid) return;
+    var ss = SpreadsheetApp.openById(sid);
+    var name = (typeof SHEETS_REPO_SUBMISSIONS !== 'undefined' && SHEETS_REPO_SUBMISSIONS) || 'submissions';
+    var sh = ss.getSheetByName(name);
+    if (!sh) return;
+    var headers = sh.getRange(1, 1, 1, Math.max(1, sh.getLastColumn())).getValues()[0];
+    var col = -1;
+    for (var i = 0; i < headers.length; i++) {
+      var h = String(headers[i] || '').trim();
+      if (!h) continue;
+      var low = h.toLowerCase();
+      if (low === 'case_id' || low === 'caseid') {
+        col = i + 1;
+        break;
+      }
+    }
+    if (col > 0) {
+      sh.getRange(1, col, sh.getMaxRows(), 1).setNumberFormat('@');
+      STATUS_API_SUBMISSIONS_CASE_ID_FORMATTED = true;
+      STATUS_API_PROPS.setProperty('SUBMISSIONS_CASE_ID_FORMATTED', '1');
+    }
   } catch (_) {}
 }
 
@@ -959,9 +1139,31 @@ function doGet(e) {
     try { Logger.log('[router:in] log failed'); } catch (_) {}
   }
   const action = String(p.action || '').trim();
+  const debugMode = String(p.debug || '').trim();
   // 1) 署名不要の ping は即返す（疎通確認用）
   if (p.ping === '1') {
     return statusApi_jsonOut_({ ok: true, via: 'status_api', ping: true }, 200);
+  }
+  if (debugMode === 'sig' || debugMode === 'sigcheck') {
+    var allowDebugSig = (STATUS_API_PROPS.getProperty('ALLOW_DEBUG_SIG') || '').trim() === '1';
+    if (!allowDebugSig) {
+      return statusApi_jsonOut_({ ok: false, error: 'debug_sig_disabled' }, 403);
+    }
+    try {
+      var dbgLine = String(p.lineId || p.line_id || '').trim();
+      var dbgCase = String(p.caseId || p.case_id || '').trim();
+      var dbgTs = String(p.ts || Math.floor(Date.now() / 1000)).trim();
+      var secret = statusApi_getSecret_();
+      if (!secret) return statusApi_jsonOut_({ ok: false, error: 'secret_not_configured' }, 400);
+      var v1Msg = dbgTs + '.' + dbgLine + '.' + dbgCase;
+      var expectedV1 = statusApi_hmac_(v1Msg, secret);
+      var payload = [dbgLine, dbgCase, dbgTs].join('|');
+      var mac = Utilities.computeHmacSignature(Utilities.MacAlgorithm.HMAC_SHA_256, payload, secret);
+      var expectedV2 = statusApi_b64u_(Utilities.base64EncodeWebSafe(mac));
+      return statusApi_jsonOut_({ ok: true, lineId: dbgLine, caseId: dbgCase, ts: dbgTs, expectedSigV1: expectedV1, expectedSigV2: expectedV2 }, 200);
+    } catch (err) {
+      return statusApi_jsonOut_({ ok: false, error: String(err) }, 400);
+    }
   }
   // ★ bootstrap は try/catch で包んで JSON エラーに変換（＋共通処理を起動）
   if (action === 'bootstrap') {
@@ -973,6 +1175,7 @@ function doGet(e) {
     }
     // ここで cases.case_id の列書式を固定
     ensureCasesCaseIdTextFormat_();
+    ensureSubmissionsCaseIdTextFormat_();
     // 可能なら V2 から lineId/caseId を復元し、共通ルートへ（staging 吸い上げ・submissions 追記）
     try {
       var pv2 = statusApi_verifyV2_(p) || {};
@@ -1031,6 +1234,7 @@ function doGet(e) {
     if (action === 'status') {
       // 列書式の固定（case_id）
       ensureCasesCaseIdTextFormat_();
+      ensureSubmissionsCaseIdTextFormat_();
       const lineId = String((e.parameter || {}).lineId || p.lineId || '').trim();
       let caseId = String((e.parameter || {}).caseId || p.caseId || '').trim();
       if (!caseId) caseId = lookupCaseIdByLineId_(lineId) || '';
@@ -1041,38 +1245,86 @@ function doGet(e) {
         return statusApi_jsonOut_({ ok: false, error: 'caseId not found' }, 404);
       }
 
+      var bustParam = String((e.parameter || {}).bust || p.bust || '').trim();
+      var cache = CacheService.getScriptCache();
+      var cacheKey = ['status', caseId].join(':');
+      if (bustParam !== '1') {
+        var cached = cache.get(cacheKey);
+        if (cached) {
+          try {
+            var parsed = JSON.parse(cached);
+            if (parsed && typeof parsed === 'object') {
+              try { Logger.log('[status:cache] hit caseId=%s', caseId); } catch (_) {}
+              return statusApi_jsonOut_(parsed, 200);
+            }
+          } catch (_) {}
+        }
+        try { Logger.log('[status:cache] miss caseId=%s', caseId); } catch (_) {}
+      }
+
       // ★ contacts.active_case_id を "0001" で強制保存（数値化対策）
       statusApi_ensureActiveCaseIdString_(lineId, caseId);
 
       // ★ 正規化後のIDでstaging吸い上げを実行（intake__*.json → <user_key>-<case_id>/）
-      statusApi_collectStaging_(lineId, caseId);
+      var allowSweep = (STATUS_API_PROPS.getProperty('ALLOW_STAGING_SWEEP_ON_STATUS') || '').trim() === '1';
+      if (allowSweep) statusApi_collectStaging_(lineId, caseId);
 
-      // getCaseForms_ が未ロードでも落ちないようにガード
-      const rawForms = typeof getCaseForms_ === 'function' ? getCaseForms_(caseId) : [];
-      const forms = rawForms.map(function (row) {
+      const sourceForms = statusApi_formsFromSubmissions_(caseId);
+      const forms = (sourceForms || []).map(function (row) {
         const formKey = String(row.form_key || '').trim();
         const snake = {
           case_id: String(row.case_id || row.caseId || caseId || ''),
           form_key: formKey,
+          case_key: row.case_key || '',
           status: row.status || '',
           can_edit: statusApi_normalizeBool_(row.can_edit != null ? row.can_edit : row.canEdit),
           reopened_at: row.reopened_at || null,
           locked_reason: row.locked_reason || null,
           reopen_until: row.reopen_until || null,
+          reopened_by: row.reopened_by || null,
+          reopened_at_epoch:
+            row.reopened_at_epoch !== undefined && row.reopened_at_epoch !== null && row.reopened_at_epoch !== ''
+              ? Number(row.reopened_at_epoch)
+              : null,
+          reopen_until_epoch:
+            row.reopen_until_epoch !== undefined && row.reopen_until_epoch !== null && row.reopen_until_epoch !== ''
+              ? Number(row.reopen_until_epoch)
+              : null,
           last_seq:
-            formKey && typeof getLastSeq_ === 'function' ? getLastSeq_(caseId, formKey) : 0,
+            row.last_seq != null
+              ? Number(row.last_seq) || 0
+              : formKey && typeof getLastSeq_ === 'function'
+              ? getLastSeq_(caseId, formKey)
+              : 0,
         };
+        if (snake.status && String(snake.status).toLowerCase() === 'received') snake.status = 'submitted';
+        if (!snake.status) snake.status = '';
+        if (snake.reopened_at_epoch != null && !Number.isFinite(snake.reopened_at_epoch)) snake.reopened_at_epoch = null;
+        if (snake.reopen_until_epoch != null && !Number.isFinite(snake.reopen_until_epoch)) snake.reopen_until_epoch = null;
         const compat = statusApi_addCamelMirrors_(snake);
         compat.caseId = String(row.caseId || caseId || '');
         if (!('canEdit' in compat)) compat.canEdit = compat.can_edit;
         return compat;
       });
-      return statusApi_jsonOut_({ ok: true, caseId: caseId, forms: forms }, 200);
+      var resp = { ok: true, caseId: caseId, case_id: caseId, forms: forms };
+      if (bustParam !== '1') {
+        try { cache.put(cacheKey, JSON.stringify(resp), 10); } catch (_) {}
+      }
+      try { Logger.log('[status:cache] store caseId=%s', caseId); } catch (_) {}
+      return statusApi_jsonOut_(resp, 200);
     }
 
-    if (action === 'markReopen') {
-      return statusApi_jsonOut_({ ok: false, error: 'use_post' }, 405);
-    }
+  if (action === 'intake_ack') {
+    return statusApi_handleIntakeAck_(p);
+  }
+
+  if (action === 'form_ack') {
+    return statusApi_handleFormAck_(p);
+  }
+
+  if (action === 'markReopen') {
+    return statusApi_jsonOut_({ ok: false, error: 'use_post' }, 405);
+  }
 
     return statusApi_jsonOut_({ ok: false, error: 'unknown action' }, 400);
   } catch (err) {
@@ -1080,16 +1332,257 @@ function doGet(e) {
   }
 }
 
-function statusApi_handleMarkReopenPost_(body) {
-  try {
-    statusApi_verify_(body || {});
-  } catch (err) {
-    return statusApi_jsonOut_({ ok: false, error: String(err) }, 400);
+function statusApi_handleIntakeAck_(params) {
+  var p = params || {};
+  var v2 = statusApi_verifyV2_(p);
+  var lineId = String(p.lineId || p.line_id || '').trim();
+  var caseIdHint = String(p.caseId || p.case_id || '').trim();
+  var tsRaw = String(p.ts || '').trim();
+  var sig = String(p.sig || '').trim();
+
+  if (v2 && v2.ok) {
+    if (!lineId) lineId = String(v2.lineId || '').trim();
+    if (!caseIdHint) caseIdHint = String(v2.caseId || '').trim();
+    if (!tsRaw) tsRaw = String(v2.ts || '').trim();
+  } else {
+    try {
+      statusApi_verify_(p);
+    } catch (err) {
+      return statusApi_jsonOut_({ ok: false, error: String(err) }, 400);
+    }
   }
 
-  const lineId = String((body || {}).lineId || '').trim();
-  const tsRaw = String((body || {}).ts || '').trim();
-  const sig = String((body || {}).sig || '').trim();
+  if (!lineId) {
+    return statusApi_jsonOut_({ ok: false, error: 'missing lineId' }, 400);
+  }
+  if (!tsRaw) {
+    return statusApi_jsonOut_({ ok: false, error: 'missing ts' }, 400);
+  }
+  if (!sig) sig = String(p.sig || '').trim();
+  if (!sig) {
+    return statusApi_jsonOut_({ ok: false, error: 'missing sig' }, 400);
+  }
+
+  try {
+    statusApi_assertNonce_(lineId, tsRaw, sig);
+  } catch (err) {
+    return statusApi_jsonOut_({ ok: false, error: String(err) }, 409);
+  }
+
+  var caseId = caseIdHint;
+  if (!caseId) caseId = lookupCaseIdByLineId_(lineId);
+  if (!caseId) {
+    return statusApi_jsonOut_({ ok: false, error: 'case_not_found' }, 404);
+  }
+  var normCaseId = statusApi_normCaseId_(caseId);
+  if (!normCaseId) {
+    return statusApi_jsonOut_({ ok: false, error: 'invalid caseId' }, 400);
+  }
+
+  statusApi_ensureActiveCaseIdString_(lineId, normCaseId);
+
+  var userKey = '';
+  try {
+    if (typeof drive_userKeyFromLineId_ === 'function') userKey = drive_userKeyFromLineId_(lineId) || '';
+  } catch (_) {}
+  if (!userKey && typeof drive_lookupCaseRow_ === 'function') {
+    try {
+      var caseRow = drive_lookupCaseRow_({ caseId: normCaseId, lineId: lineId });
+      if (caseRow && caseRow.userKey) userKey = String(caseRow.userKey || '').trim();
+    } catch (_) {}
+  }
+
+  var caseKey = userKey ? userKey + '-' + normCaseId : '';
+  var folderEnsured = false;
+  if (caseKey && typeof drive_getOrCreateCaseFolderByKey_ === 'function') {
+    try {
+      var folder = drive_getOrCreateCaseFolderByKey_(caseKey);
+      var folderId = '';
+      if (folder && typeof folder.getId === 'function') folderId = folder.getId();
+      else if (folder) folderId = String(folder);
+      if (folderId && typeof updateCasesRow_ === 'function') {
+        try {
+          updateCasesRow_(normCaseId, { case_key: caseKey, folder_id: folderId, status: 'intake', updated_at: new Date().toISOString() });
+          folderEnsured = true;
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+  if (!folderEnsured && typeof updateCasesRow_ === 'function' && caseKey) {
+    try {
+      updateCasesRow_(normCaseId, { case_key: caseKey, user_key: userKey || '', updated_at: new Date().toISOString() });
+    } catch (_) {}
+  }
+
+  var nextSeq = 1;
+  try {
+    if (typeof getLastSeq_ === 'function') {
+      nextSeq = (getLastSeq_(normCaseId, 'intake') | 0) + 1;
+      if (!(nextSeq > 0)) nextSeq = 1;
+    }
+  } catch (_) {
+    nextSeq = 1;
+  }
+
+  var submissionId = String(p.submission_id || p.submissionId || '').trim();
+  if (!submissionId) submissionId = 'ack:' + normCaseId + ':intake';
+  var nowIso = new Date().toISOString();
+
+  if (typeof upsertSubmission_ === 'function') {
+    upsertSubmission_({
+      submission_id: submissionId,
+      form_key: 'intake',
+      case_id: normCaseId,
+      user_key: userKey,
+      case_key: caseKey,
+      line_id: lineId,
+      seq: nextSeq,
+      supersedes_seq: nextSeq > 1 ? String(nextSeq - 1) : '',
+      status: 'received',
+      submitted_at: nowIso,
+      received_at: nowIso,
+      referrer: 'intake_ack',
+      redirect_url: '',
+      reopened_at: '',
+      reopened_at_epoch: '',
+      reopen_until: '',
+      reopen_until_epoch: '',
+      locked_reason: '',
+      can_edit: false,
+      reopened_by: '',
+    });
+  }
+
+  ensureSubmissionsCaseIdTextFormat_();
+
+  try {
+    CacheService.getScriptCache().remove('status:' + normCaseId);
+  } catch (_) {}
+
+  return statusApi_jsonOut_({ ok: true, caseId: normCaseId, case_id: normCaseId }, 200);
+}
+
+function statusApi_handleFormAck_(params) {
+  var p = params || {};
+  var formKey = String(p.form_key || p.formKey || '').trim();
+  if (!formKey) return statusApi_jsonOut_({ ok: false, error: 'missing form_key' }, 400);
+
+  var v2 = statusApi_verifyV2_(p);
+  var lineId = String(p.lineId || p.line_id || '').trim();
+  var caseIdHint = String(p.caseId || p.case_id || '').trim();
+  var tsRaw = String(p.ts || '').trim();
+  var sigRaw = String(p.sig || '').trim();
+  if (v2 && v2.ok) {
+    if (!lineId) lineId = String(v2.lineId || '').trim();
+    if (!caseIdHint) caseIdHint = String(v2.caseId || '').trim();
+    if (!tsRaw) tsRaw = String(v2.ts || '').trim();
+  } else {
+    try {
+      statusApi_verify_(p);
+    } catch (err) {
+      return statusApi_jsonOut_({ ok: false, error: String(err) }, 400);
+    }
+  }
+
+  if (!sigRaw) sigRaw = String(p.sig || '').trim();
+  if (!lineId) return statusApi_jsonOut_({ ok: false, error: 'missing lineId' }, 400);
+  if (!tsRaw) return statusApi_jsonOut_({ ok: false, error: 'missing ts' }, 400);
+  if (!sigRaw) return statusApi_jsonOut_({ ok: false, error: 'missing sig' }, 400);
+
+  try {
+    statusApi_assertNonce_(lineId, tsRaw, sigRaw);
+  } catch (err) {
+    return statusApi_jsonOut_({ ok: false, error: String(err) }, 409);
+  }
+
+  var caseId = caseIdHint;
+  if (!caseId) caseId = lookupCaseIdByLineId_(lineId);
+  if (!caseId) return statusApi_jsonOut_({ ok: false, error: 'case_not_found' }, 404);
+  var normCaseId = statusApi_normCaseId_(caseId);
+  if (!normCaseId) return statusApi_jsonOut_({ ok: false, error: 'invalid caseId' }, 400);
+
+  statusApi_ensureActiveCaseIdString_(lineId, normCaseId);
+
+  var userKey = '';
+  try {
+    if (typeof drive_userKeyFromLineId_ === 'function') userKey = drive_userKeyFromLineId_(lineId) || '';
+  } catch (_) {}
+  if (!userKey && typeof drive_lookupCaseRow_ === 'function') {
+    try {
+      var caseRow = drive_lookupCaseRow_({ caseId: normCaseId, lineId: lineId });
+      if (caseRow && caseRow.userKey) userKey = String(caseRow.userKey || '').trim();
+    } catch (_) {}
+  }
+
+  var caseKey = userKey ? userKey + '-' + normCaseId : '';
+  var nextSeq = 1;
+  try {
+    if (typeof getLastSeq_ === 'function') {
+      nextSeq = (getLastSeq_(normCaseId, formKey) | 0) + 1;
+      if (!(nextSeq > 0)) nextSeq = 1;
+    }
+  } catch (_) {
+    nextSeq = 1;
+  }
+
+  var submissionId = String(p.submission_id || p.submissionId || '').trim();
+  if (!submissionId) submissionId = 'ack:' + normCaseId + ':' + formKey;
+  var nowIso = new Date().toISOString();
+  if (typeof upsertSubmission_ === 'function') {
+    upsertSubmission_({
+      submission_id: submissionId,
+      form_key: formKey,
+      case_id: normCaseId,
+      user_key: userKey,
+      case_key: caseKey,
+      line_id: lineId,
+      seq: nextSeq,
+      supersedes_seq: nextSeq > 1 ? String(nextSeq - 1) : '',
+      status: 'received',
+      submitted_at: nowIso,
+      received_at: nowIso,
+      referrer: 'form_ack',
+      redirect_url: '',
+      reopened_at: '',
+      reopened_at_epoch: '',
+      reopen_until: '',
+      reopen_until_epoch: '',
+      locked_reason: '',
+      can_edit: false,
+      reopened_by: '',
+    });
+  }
+
+  ensureSubmissionsCaseIdTextFormat_();
+
+  try {
+    CacheService.getScriptCache().remove('status:' + normCaseId);
+  } catch (_) {}
+
+  return statusApi_jsonOut_({ ok: true, caseId: normCaseId, case_id: normCaseId }, 200);
+}
+
+function statusApi_handleMarkReopenPost_(body) {
+  var params = body || {};
+  var v2 = statusApi_verifyV2_(params);
+  var lineId = String(params.lineId || params.line_id || '').trim();
+  var caseIdHint = String(params.caseId || params.case_id || '').trim();
+  var tsRaw = String(params.ts || '').trim();
+  var sig = String(params.sig || '').trim();
+
+  if (v2 && v2.ok) {
+    if (!lineId) lineId = String(v2.lineId || '').trim();
+    if (!caseIdHint) caseIdHint = String(v2.caseId || '').trim();
+    if (!tsRaw) tsRaw = String(v2.ts || '').trim();
+  } else {
+    try {
+      statusApi_verify_(params || {});
+    } catch (err) {
+      return statusApi_jsonOut_({ ok: false, error: String(err) }, 400);
+    }
+  }
+
+  if (!sig) sig = String(params.sig || '').trim();
 
   try {
     statusApi_assertNonce_(lineId, tsRaw, sig);
@@ -1101,27 +1594,87 @@ function statusApi_handleMarkReopenPost_(body) {
     return statusApi_jsonOut_({ ok: false, error: 'missing lineId' }, 400);
   }
 
+  if (!tsRaw) {
+    return statusApi_jsonOut_({ ok: false, error: 'missing ts' }, 400);
+  }
+  if (!sig) {
+    return statusApi_jsonOut_({ ok: false, error: 'missing sig' }, 400);
+  }
+
   const formKey = String((body || {}).form_key || (body || {}).formKey || '').trim();
   if (!formKey) {
     return statusApi_jsonOut_({ ok: false, error: 'missing form_key' }, 400);
   }
 
-  const caseId = lookupCaseIdByLineId_(lineId);
+  var caseId = caseIdHint;
+  if (!caseId) caseId = lookupCaseIdByLineId_(lineId);
   if (!caseId) {
     return statusApi_jsonOut_({ ok: false, error: 'case_not_found' }, 404);
   }
-  statusApi_collectStaging_(lineId, statusApi_normCaseId_(caseId));
+  var normCaseId = statusApi_normCaseId_(caseId);
+  var allowSweepOnStatus = (STATUS_API_PROPS.getProperty('ALLOW_STAGING_SWEEP_ON_STATUS') || '').trim() === '1';
+  if (allowSweepOnStatus) statusApi_collectStaging_(lineId, normCaseId);
 
-  upsertCasesForms_({
-    case_id: statusApi_normCaseId_(caseId),
-    form_key: formKey,
-    status: 'reopened',
-    can_edit: true,
-    reopened_at: new Date().toISOString(),
-    reopened_by: ((body || {}).staff || 'staff').toString(),
-    reopen_until: (body || {}).reopen_until || (body || {}).reopenUntil || '',
-  });
-  return statusApi_jsonOut_({ ok: true, caseId: statusApi_normCaseId_(caseId) }, 200);
+  var now = new Date();
+  var reopenedAt = now.toISOString();
+  var reopenUntil = String((body || {}).reopen_until || (body || {}).reopenUntil || '').trim();
+  var lockedReason = String((body || {}).locked_reason || (body || {}).lockedReason || '').trim();
+  var reopeningStaff = ((body || {}).staff || 'staff').toString();
+  var userKeyForLine = '';
+  try {
+    if (typeof drive_userKeyFromLineId_ === 'function') {
+      userKeyForLine = drive_userKeyFromLineId_(lineId) || '';
+    }
+  } catch (_) {}
+  var caseKey = userKeyForLine ? userKeyForLine + '-' + normCaseId : '';
+  var nextSeq = 1;
+  try {
+    if (typeof getLastSeq_ === 'function') {
+      nextSeq = (getLastSeq_(normCaseId, formKey) | 0) + 1;
+      if (!(nextSeq > 0)) nextSeq = 1;
+    }
+  } catch (_) {
+    nextSeq = 1;
+  }
+  var reopenedAtEpoch = Math.floor(now.getTime() / 1000);
+  var reopenUntilEpoch = null;
+  if (reopenUntil) {
+    var parsedUntil = Date.parse(reopenUntil);
+    if (Number.isFinite(parsedUntil)) reopenUntilEpoch = Math.floor(parsedUntil / 1000);
+  }
+  var reopenSubmissionId = 'reopen:' + formKey;
+  if (typeof upsertSubmission_ === 'function') {
+    upsertSubmission_({
+      submission_id: reopenSubmissionId,
+      form_key: formKey,
+      case_id: normCaseId,
+      user_key: userKeyForLine,
+      case_key: caseKey,
+      line_id: lineId,
+      seq: nextSeq,
+      supersedes_seq: nextSeq > 1 ? String(nextSeq - 1) : '',
+      status: 'reopened',
+      submitted_at: reopenedAt,
+      received_at: reopenedAt,
+      referrer: '',
+      redirect_url: '',
+      reopened_at: reopenedAt,
+      reopened_at_epoch: Number.isFinite(reopenedAtEpoch) ? reopenedAtEpoch : '',
+      reopen_until: reopenUntil,
+      reopen_until_epoch: reopenUntilEpoch != null ? reopenUntilEpoch : '',
+      locked_reason: lockedReason,
+      can_edit: true,
+      reopened_by: reopeningStaff,
+    });
+  }
+
+  ensureSubmissionsCaseIdTextFormat_();
+
+  try {
+    CacheService.getScriptCache().remove('status:' + normCaseId);
+  } catch (_) {}
+
+  return statusApi_jsonOut_({ ok: true, caseId: normCaseId, case_id: normCaseId }, 200);
 }
 
 /**
@@ -1133,7 +1686,7 @@ function recordSubmission_(payload) {
   const caseIdRaw = payload.case_id || payload.caseId;
   const formKeyRaw = payload.form_key;
   if (!caseIdRaw || !formKeyRaw) return;
-  const caseId = String(caseIdRaw).trim();
+  const caseId = statusApi_normCaseId_(caseIdRaw);
   const formKey = String(formKeyRaw).trim();
   if (!caseId || !formKey) return;
 
@@ -1172,6 +1725,12 @@ function recordSubmission_(payload) {
     if (inferredKey) caseKey = inferredKey + '-' + caseId;
   }
 
+  if (caseKey && caseKey.indexOf('-') >= 0) {
+    const parts = caseKey.split('-');
+    const head = parts[0] || '';
+    caseKey = head + '-' + caseId;
+  }
+
   // 既存フォルダの参照のみ（作成しない）
   let caseFolderId = '';
   try {
@@ -1204,14 +1763,6 @@ function recordSubmission_(payload) {
       typeof sheetsRepo_hasSubmission_ === 'function' &&
       sheetsRepo_hasSubmission_(caseId, formKey, submissionId)
     ) {
-      upsertCasesForms_({
-        case_id: caseId,
-        form_key: formKey,
-        status: 'submitted',
-        can_edit: false,
-        locked_reason: payload.locked_reason || '',
-        updated_at: new Date().toISOString(),
-      });
       return;
     }
   } catch (err) {
@@ -1229,6 +1780,13 @@ function recordSubmission_(payload) {
     ? new Date(payload.received_at).toISOString()
     : new Date().toISOString();
   if (typeof upsertSubmission_ === 'function') {
+    var statusValue = payload.status;
+    if (!statusValue || String(statusValue).trim().length === 0) {
+      statusValue = formKey === 'intake' ? 'received' : formKey;
+    }
+    if (formKey === 'intake' && String(statusValue).toLowerCase() === formKey.toLowerCase()) {
+      statusValue = 'received';
+    }
     upsertSubmission_({
       case_id: caseIdNorm,
       case_key: caseKey,
@@ -1242,21 +1800,15 @@ function recordSubmission_(payload) {
       user_key: payload.user_key || '',
       line_id: payload.line_id || '',
       submitted_at: payload.submitted_at || receivedAt,
-      status: payload.status || formKey,
+      status: statusValue,
       referrer: (payload && payload.meta && payload.meta.referrer) || payload.referrer || '',
       redirect_url: (payload && payload.meta && payload.meta.redirect_url) || payload.redirect_url || '',
     });
   }
-  if (typeof upsertCasesForms_ === 'function') {
-    upsertCasesForms_({
-      case_id: caseId,
-      form_key: formKey,
-      status: 'submitted',
-      can_edit: false,
-      locked_reason: payload.locked_reason || '',
-      updated_at: new Date().toISOString(),
-    });
-  }
+
+  try {
+    CacheService.getScriptCache().remove('status:' + caseIdNorm);
+  } catch (_) {}
 }
 
 /** POST /exec でのルーティング */

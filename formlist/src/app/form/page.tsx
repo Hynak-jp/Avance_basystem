@@ -169,7 +169,6 @@ export default async function FormPage() {
   const preferredIntakeFormId =
     intakeFormIdEnv && intakeFormIdEnv.length > 0 ? intakeFormIdEnv : fallbackIntakeFormId;
   const intakeBase = process.env.NEXT_PUBLIC_INTAKE_FORM_URL!;
-  const intakeRedirect = `${origin}/done?form=intake`;
   const formsWithHref = forms.map((f, index) => {
     const isIntakeForm =
       preferredIntakeFormId && preferredIntakeFormId.length > 0
@@ -180,6 +179,12 @@ export default async function FormPage() {
     const redirectUrl = new URL('/done', origin);
     redirectUrl.searchParams.set('formId', f.formId);
     if (f.formKey) redirectUrl.searchParams.set('formKey', f.formKey);
+    const storeKeyParam = f.storeKey || f.formKey || f.formId;
+    if (storeKeyParam) redirectUrl.searchParams.set('storeKey', storeKeyParam);
+    if (caseId) redirectUrl.searchParams.set('caseId', caseId);
+    redirectUrl.searchParams.set('bust', '1');
+    redirectUrl.searchParams.set('lineId', lineId!);
+    if (isIntakeForm) redirectUrl.searchParams.set('form', 'intake');
     const redirectForForm = redirectUrl.toString();
     if (!locked) {
       if (isIntakeForm) {
@@ -189,9 +194,9 @@ export default async function FormPage() {
                 redirectUrl: redirectForForm,
                 formId: f.formId,
                 lineIdQueryKeys: [],
-                caseIdQueryKeys: ['case_id'],
+                caseIdQueryKeys: ['case_id[0]'],
               })
-            : makeIntakeUrl(intakeBase, intakeRedirect, lineId!, {
+            : makeIntakeUrl(intakeBase, redirectForForm, lineId!, {
                 formId: f.formId,
               });
       } else if (caseReady && caseId) {
@@ -199,7 +204,7 @@ export default async function FormPage() {
           redirectUrl: redirectForForm,
           formId: f.formId,
           lineIdQueryKeys: [],
-          caseIdQueryKeys: ['case_id'],
+          caseIdQueryKeys: ['case_id[0]'],
         });
       }
     }

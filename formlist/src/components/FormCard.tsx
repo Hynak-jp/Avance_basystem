@@ -10,6 +10,7 @@ type Props = {
   description: string;
   baseUrl: string; // 外部フォームのURL
   lineId: string;
+  caseId?: string | null;
   signedHref?: string; // 事前署名済みURL（優先）
   disabled?: boolean;
   disabledReason?: string;
@@ -25,6 +26,7 @@ export default function FormCard({
   description,
   baseUrl,
   lineId,
+  caseId,
   signedHref: hrefOverride,
   disabled,
   disabledReason,
@@ -46,6 +48,9 @@ export default function FormCard({
         const redirectUrl = new URL('https://formlist.vercel.app/done');
         redirectUrl.searchParams.set('formId', formId);
         if (formKey) redirectUrl.searchParams.set('formKey', formKey);
+        const storeKeyParam = storeKey || formKey || formId;
+        if (storeKeyParam) redirectUrl.searchParams.set('storeKey', storeKeyParam);
+        if (caseId) redirectUrl.searchParams.set('caseId', caseId);
         url.searchParams.set('line_id[0]', lineId);
         url.searchParams.set('form_id', formId);
         url.searchParams.set('redirect_url[0]', redirectUrl.toString());

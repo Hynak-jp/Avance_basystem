@@ -95,15 +95,16 @@ export default function FormProgressClient({ lineId, displayName, caseId, forms 
             key={form.storeKey || form.formId}
             formId={form.formId}
             title={form.title}
-            description={form.description}
-            baseUrl={form.baseUrl}
-            signedHref={form.signedHref}
-            lineId={lineId}
-            disabled={form.disabled}
-            disabledReason={form.disabledReason}
-            completed={form.completed}
-            formKey={form.formKey}
-            storeKey={form.storeKey || form.formKey || form.formId}
+          description={form.description}
+          baseUrl={form.baseUrl}
+          signedHref={form.signedHref}
+          lineId={lineId}
+          caseId={caseId}
+          disabled={form.disabled}
+          disabledReason={form.disabledReason}
+          completed={form.completed}
+          formKey={form.formKey}
+          storeKey={form.storeKey || form.formKey || form.formId}
             serverStatus={form.formKey ? formsMap.get(form.formKey) : undefined}
           />
         ))}
