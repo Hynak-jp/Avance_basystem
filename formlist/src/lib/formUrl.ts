@@ -74,10 +74,8 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opt
 
   // 2) FormMailer 側のURLに、redirect_url を渡す
   const url = safeURL(baseUrl, origin);
-  const lineIdQueryKeys =
-    opts.lineIdQueryKeys && opts.lineIdQueryKeys.length > 0 ? opts.lineIdQueryKeys : ['line_id[0]'];
-  const caseIdQueryKeys =
-    opts.caseIdQueryKeys && opts.caseIdQueryKeys.length > 0 ? opts.caseIdQueryKeys : ['case_id[0]'];
+  const lineIdQueryKeys = opts.lineIdQueryKeys !== undefined ? opts.lineIdQueryKeys : ['line_id[0]'];
+  const caseIdQueryKeys = opts.caseIdQueryKeys !== undefined ? opts.caseIdQueryKeys : ['case_id[0]'];
   const redirectUrlQueryKey = opts.redirectUrlQueryKey ?? 'redirect_url[0]';
   const referrerQueryKey = opts.referrerQueryKey ?? 'referrer[0]';
   lineIdQueryKeys.forEach((key) => {
@@ -123,8 +121,7 @@ export function makeIntakeUrl(
   if (opts.formId) redirect.searchParams.set('formId', opts.formId);
 
   const url = safeURL(intakeBase, origin);
-  const lineIdQueryKeys =
-    opts.lineIdQueryKeys && opts.lineIdQueryKeys.length > 0 ? opts.lineIdQueryKeys : ['line_id[0]'];
+  const lineIdQueryKeys = opts.lineIdQueryKeys !== undefined ? opts.lineIdQueryKeys : ['line_id[0]'];
   const redirectUrlQueryKey = opts.redirectUrlQueryKey ?? 'redirect_url[0]';
   const referrerQueryKey = opts.referrerQueryKey ?? 'referrer[0]';
   lineIdQueryKeys.forEach((key) => {
