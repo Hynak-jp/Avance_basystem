@@ -10,6 +10,40 @@ const FORM_INTAKE_LABEL_PROCESSED =
   typeof LABEL_PROCESSED === 'string' ? LABEL_PROCESSED : 'FormAttach/Processed';
 const FORM_INTAKE_LABEL_LOCK = 'BAS/lock';
 
+// ===== FIELDS ブロック抽出（メール本文から） =====
+if (typeof parseFieldsBlock_ !== 'function') {
+  function parseFieldsBlock_(text) {
+    try {
+      text = String(text || '');
+      var m = text.match(/====\s*FIELDS START\s*====([\s\S]*?)====\s*FIELDS END\s*====/i);
+      if (!m) return [];
+      var body = m[1].replace(/\r/g, '');
+      var lines = body.split('\n');
+      var out = [];
+      var curLabel = '', curValue = [];
+      function flush() {
+        if (!curLabel) return;
+        var val = curValue.join('\n').replace(/^\s+|\s+$/g, '');
+        out.push({ label: curLabel, value: val });
+        curLabel = ''; curValue = [];
+      }
+      lines.forEach(function (ln) {
+        var l = ln.replace(/\s+$/, '');
+        var m2 = l.match(/^([【].+?[】])\s*$/);
+        if (m2) { flush(); curLabel = m2[1]; curValue = []; }
+        else {
+          // 先頭の全角スペースは維持
+          curValue.push(l.replace(/^\u3000/, '　'));
+        }
+      });
+      flush();
+      return out;
+    } catch (_) {
+      return [];
+    }
+  }
+}
+
 // ===== 共通マッチャ（必要なら定義）: case_key → case_id → line_id =====
 if (typeof normCaseId_ !== 'function') {
   function normCaseId_(s) {
@@ -114,6 +148,211 @@ if (typeof resolveMetaWithPriority_ !== 'function') {
   }
 }
 
+// write-through mover: staging 保存直後に、即ケース直下へ移送を試みる
+if (typeof tryMoveIntakeToCase_ !== 'function') {
+  function tryMoveIntakeToCase_(meta, file, fileName) {
+    try {
+      // --- FIELDS ブロックの整形ヘルパ ---
+      function toStr_(v) { return v == null ? '' : String(v); }
+      function buildFieldsBlock_(m) {
+        m = m || {};
+        var name   = toStr_(m.name || m.full_name || m['氏名']);
+        var email  = toStr_(m.email || m['メールアドレス']);
+        var phone  = toStr_(m.phone || m.tel || m['電話番号']);
+        var gender = toStr_(m.gender || m['性別']);
+        var dob    = toStr_(m.birth || m.birthdate || m['生年月日']);
+        // 住所は項目が分割されていても結合
+        var postal = toStr_(m.postal || m.zip || m['郵便番号']);
+        var addr   = [
+          toStr_(m.pref || m['都道府県']),
+          toStr_(m.city || m['市区町村']),
+          toStr_(m.addr1 || m['番地以降']),
+          toStr_(m.addr2 || m['建物名・部屋番号']),
+        ].filter(Boolean).join(' ');
+        var address = [postal ? postal : '', addr].filter(Boolean).join(' ');
+        return [
+          '==== FIELDS START ====','【名前】','　' + name,
+          '【メールアドレス】','　' + email,
+          '【電話番号】','　' + phone,
+          '【性別】','　' + gender,
+          '【生年月日】','　' + dob,
+          '【住所】','　' + address,
+          '','',
+          '==== FIELDS END ===='
+        ].join('\n');
+      }
+      meta = meta || {};
+      var uk  = String(meta.user_key || meta.userKey || '').trim();
+      var cid = normCaseId_(meta.case_id || meta.caseId || '');
+      var ckey= normCaseKey_(meta.case_key || meta.caseKey || (uk && cid ? (String(uk).toLowerCase() + '-' + cid) : ''));
+      var lid = String(meta.line_id || meta.lineId || '').trim();
+      var known = { case_key: ckey, case_id: cid, line_id: lid };
+
+      // ケースフォルダ解決（case_key 優先 → 予備として case_id 名の直一致）
+      var caseFolder = null;
+      try {
+        if (ckey) {
+          var it = DriveApp.getFoldersByName(ckey);
+          if (it && it.hasNext()) caseFolder = it.next();
+        }
+        if (!caseFolder && cid) {
+          var it2 = DriveApp.getFoldersByName(cid);
+          if (it2 && it2.hasNext()) caseFolder = it2.next();
+        }
+      } catch (_) {}
+      if (!caseFolder) {
+        try { Logger.log('[router.move] no case folder for %s (ckey=%s,cid=%s,lid=%s)', fileName || '', ckey || '', cid || '', lid || ''); } catch(_){ }
+        return false;
+      }
+
+      // 一致確認（冪等・安全）
+      var res = matchMetaToCase_(meta, known);
+      if (!res || !res.ok) {
+        try { Logger.log('[router.move] skip: meta not matched to known for %s', fileName || ''); } catch(_){ }
+        return false;
+      }
+
+      // JSON 整形・補完して保存（原本は削除）
+      var txt = '';
+      try { txt = file && file.getBlob && file.getBlob().getDataAsString('utf-8'); } catch(_){}
+      var obj = {};
+      try { obj = JSON.parse(txt || '{}') || {}; } catch(_) { obj = {}; }
+      obj = obj && typeof obj === 'object' ? obj : {};
+      obj.meta = obj.meta || {};
+      if (!obj.meta.case_id)  obj.meta.case_id  = cid;
+      if (!obj.meta.user_key) obj.meta.user_key = uk;
+      if (!obj.meta.case_key) obj.meta.case_key = ckey;
+      if (!obj.meta.line_id)  obj.meta.line_id  = lid;
+      // ---- intake の正規化＆出力物（fields_block / fieldsRaw / model.schema） ----
+      obj.model = obj.model || {};
+      // 値取りのエイリアス（最初の非空を採用）
+      function firstNonEmpty() {
+        for (var i = 0; i < arguments.length; i++) {
+          var v = arguments[i];
+          if (v != null && String(v).trim() !== '') return String(v).trim();
+        }
+        return '';
+      }
+      var M = obj.model, ME = obj.meta || {};
+      var FR = Array.isArray(obj.fieldsRaw) ? obj.fieldsRaw : [];
+      var fMap = {};
+      try { FR.forEach(function (e) { if (e && e.label) fMap[String(e.label)] = String(e.value == null ? '' : e.value).trim(); }); } catch(_){}
+      var name   = firstNonEmpty(fMap['【名前】'],           M.name, M.full_name, M['氏名'], (M.applicant && M.applicant.name));
+      var email  = firstNonEmpty(fMap['【メールアドレス】'], M.email, (M.applicant && M.applicant.email), ME.email);
+      var phone  = firstNonEmpty(fMap['【電話番号】'],       M.phone, M.tel, M['電話番号'], (M.applicant && M.applicant.phone));
+      var gender = firstNonEmpty(fMap['【性別】'],           M.gender, M['性別'], (M.applicant && M.applicant.gender));
+      var birth  = firstNonEmpty(fMap['【生年月日】'],       M.birth, M.birthdate, M['生年月日'], (M.applicant && M.applicant.birth));
+      var addrLineFromFields = firstNonEmpty(fMap['【住所】']);
+      // postal はまず明示項目から。住所行に含まれる場合は後で補完
+      var postal = firstNonEmpty(M.postal, M.zip, M['郵便番号'], (M.address && M.address.postal));
+      var pref   = firstNonEmpty(M.pref, M['都道府県'], (M.address && M.address.pref));
+      var city   = firstNonEmpty(M.city, M['市区町村'], (M.address && M.address.city));
+      var addr1  = firstNonEmpty(M.addr1, M['番地以降'], (M.address && M.address.addr1));
+      var addr2  = firstNonEmpty(M.addr2, M['建物名・部屋番号'], (M.address && M.address.addr2));
+      var addressLine = '';
+      if (addrLineFromFields) {
+        addressLine = addrLineFromFields;
+        // 住所行の先頭が郵便番号なら分離して補完（ハイフン無しも許容）
+        try {
+          var mm = addressLine.match(/^\s*([0-9]{3}-?[0-9]{4})\s*(.*)$/);
+          if (mm) {
+            if (!postal) postal = (mm[1] || '').replace(/^(\d{3})(\d{4})$/, '$1-$2');
+            // 残部は rest として保持（pref/city 等は既存項目があればそちらを優先）
+          }
+        } catch (_) {}
+      } else {
+        addressLine = [postal ? postal : '', [pref, city, addr1, addr2].filter(Boolean).join(' ')].filter(Boolean).join(' ');
+      }
+
+      function buildFieldsBlock() {
+        var lines = [
+          '==== FIELDS START ====',
+          '【名前】',
+          '　' + (name || ''),
+          '【メールアドレス】',
+          '　' + (email || ''),
+          '【電話番号】',
+          '　' + (phone || ''),
+          '【性別】',
+          '　' + (gender || ''),
+          '【生年月日】',
+          '　' + (birth || ''),
+          '【住所】',
+          '　' + (addressLine || ''),
+          '',
+          '',
+          '==== FIELDS END ===='],
+          out = lines.join('\n');
+        return out;
+      }
+      obj.model.fields_block = buildFieldsBlock();
+
+      // 他フォームと同じ [{label,value}] 形式
+      obj.fieldsRaw = [
+        { label: '【名前】',           value: name },
+        { label: '【メールアドレス】', value: email },
+        { label: '【電話番号】',       value: phone },
+        { label: '【性別】',           value: gender },
+        { label: '【生年月日】',       value: birth },
+        { label: '【住所】',           value: addressLine },
+      ];
+
+      // model の軽い正規化
+      obj.model.schema = obj.model.schema || 'intake@v1';
+      obj.model.applicant = obj.model.applicant || {};
+      if (name)   obj.model.applicant.name   = name;
+      if (email)  obj.model.applicant.email  = email;
+      if (phone)  obj.model.applicant.phone  = phone;
+      if (gender) obj.model.applicant.gender = gender;
+      if (birth)  obj.model.applicant.birth  = birth;
+      obj.model.address = obj.model.address || {};
+      if (postal) obj.model.address.postal = postal;
+      if (pref)   obj.model.address.pref   = pref;
+      if (city)   obj.model.address.city   = city;
+      if (addr1)  obj.model.address.addr1  = addr1;
+      if (addr2)  obj.model.address.addr2  = addr2;
+      if (addressLine) obj.model.address.line = addressLine;
+
+      var saved = '';
+      try { saved = JSON.stringify(obj, null, 2) + '\n'; } catch(_) { saved = (txt && (txt + '\n')) || '{}\n'; }
+      var outBlob = Utilities.newBlob(saved, 'application/json; charset=utf-8', fileName || (file && file.getName && file.getName()) || ('intake__' + Date.now() + '.json'));
+      try { caseFolder.createFile(outBlob); } catch(_){ }
+      try { Logger.log('[router.move] saved bytes=%s name=%s', (outBlob && outBlob.getBytes && outBlob.getBytes().length) || -1, fileName || ''); } catch(_){ }
+      try { file && file.setTrashed && file.setTrashed(true); } catch(_){}
+      try { Logger.log('[router.move] moved name=%s by=%s → folder=%s', fileName || '', res.by || '', (caseFolder && caseFolder.getName && caseFolder.getName()) || ''); } catch(_){}
+
+      // submissions 追記（重複ガード）
+      try {
+        var sid = (obj && obj.meta && obj.meta.submission_id) || ((String(fileName || '').match(/^intake__(\d+)\.json$/i) || [])[1] || '');
+        if (!sid) { try { var m2 = String(fileName || '').match(/__(\d+)\.json$/); if (m2) sid = m2[1]; } catch(_){}
+        }
+        if (!sid) sid = String(Date.now());
+        if (typeof submissions_hasRow_ === 'function' && typeof submissions_appendRow === 'function') {
+          if (!submissions_hasRow_(sid, 'intake')) {
+            submissions_appendRow({
+              submission_id: sid,
+              form_key: 'intake',
+              case_id: cid,
+              user_key: uk,
+              line_id: lid,
+              submitted_at: (obj && obj.meta && obj.meta.submitted_at) || new Date().toISOString(),
+              status: 'intake',
+              // 拡張カラム
+              seq: (obj && obj.meta && obj.meta.seq) || '',
+              referrer: (obj && obj.meta && obj.meta.referrer) || '',
+              redirect_url: (obj && obj.meta && obj.meta.redirect_url) || ''
+            });
+          }
+        }
+      } catch (_) {}
+      return true;
+    } catch (e) {
+      try { Logger.log('[router.move] error %s', (e && e.message) || e); } catch(_){ }
+      return false;
+    }
+  }
+}
+
 function resolveCaseByCaseIdSmart_(caseId) {
   const raw = String(caseId || '').trim();
   const noPad = raw.replace(/^0+/, '');
@@ -139,7 +378,9 @@ const FORM_INTAKE_REGISTRY = {
       }
       const meta = parseMetaBlock_(body) || {};
       if (!meta.form_key) meta.form_key = 'intake';
-      return { meta, fieldsRaw: [], model: {} };
+      // FIELDS ブロックを本文から抽出
+      const fieldsRaw = (typeof parseFieldsBlock_ === 'function') ? parseFieldsBlock_(body) : [];
+      return { meta, fieldsRaw, model: {} };
     },
     caseResolver: resolveCaseByCaseIdSmart_,
     statusAfterSave: 'intake',
@@ -164,6 +405,7 @@ const FORM_INTAKE_REGISTRY = {
   s2002_userform: {
     name: 'S2002 申立',
     queueLabel: 'BAS/S2002/Queue',
+    processedLabel: 'BAS/S2002/Processed',
     parser: function (subject, body) {
       if (typeof parseFormMail_ !== 'function') {
         throw new Error('parseFormMail_ is not defined');
@@ -174,6 +416,12 @@ const FORM_INTAKE_REGISTRY = {
     statusAfterSave: 'draft',
     afterSave: function (caseInfo, parsed) {
       if (typeof generateS2002Draft_ === 'function') {
+        // ドラフト生成前に folderId を強制補正（未設定時）
+        try {
+          if (!caseInfo.folderId && typeof ensureCaseFolderId_ === 'function') {
+            caseInfo.folderId = ensureCaseFolderId_(caseInfo);
+          }
+        } catch (_) {}
         const draft = generateS2002Draft_(caseInfo, parsed);
         const patch = {};
         if (draft && draft.draftUrl) patch.last_draft_url = draft.draftUrl;
@@ -768,12 +1016,15 @@ function run_ProcessInbox_AllForms() {
   formIntake_assignQueueLabels_();
 
   const lockLabel = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_LOCK);
-  const processedLabel = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_PROCESSED);
+  const processedLabelDefault = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_PROCESSED);
   const toProcessLabel = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_TO_PROCESS);
 
   Object.keys(FORM_INTAKE_REGISTRY).forEach(function (formKey) {
     const def = FORM_INTAKE_REGISTRY[formKey];
     const queueLabel = formIntake_labelOrCreate_(def.queueLabel);
+    const processedLabel = def.processedLabel
+      ? formIntake_labelOrCreate_(def.processedLabel)
+      : processedLabelDefault;
     const query = `label:${def.queueLabel} -label:${FORM_INTAKE_LABEL_LOCK}`;
     const threads = GmailApp.search(query, 0, 50);
     threads.forEach(function (thread) {
@@ -888,35 +1139,11 @@ function run_ProcessInbox_AllForms() {
             parsed.meta.line_id  = parsed.meta.line_id || mEarly.line_id || knownEarly.line_id || '';
             try { Logger.log('[Intake] adopt(by=%s,source=%s) candidates=%s', rEarly.by || '', rEarly.source || '', JSON.stringify(buildCandidates_(candEarly))); } catch (_) {}
           } catch (_) {}
-          // 追加: 保存直前に、候補群から採用源と優先キーを確定（後段保存でも同様の形に）
-          try {
-            var uk2 = '';
-            try { uk2 = fi_userKeyFromLineId_(String(parsed?.meta?.line_id || knownLineId2 || '')) || ''; } catch (_) {}
-            var known2 = {
-              case_key: (uk2 && knownCaseId2) ? (String(uk2).toLowerCase() + '-' + normCaseId_(knownCaseId2)) : '',
-              case_id: normCaseId_(knownCaseId2 || ''),
-              line_id: String(parsed?.meta?.line_id || knownLineId2 || ''),
-            };
-            var fromCases2 = (typeof fi_casesLookup_ === 'function') ? fi_casesLookup_({ lineId: known2.line_id, caseId: known2.case_id }) : null;
-            var fromContacts2 = (typeof fi_contactsLookupByEmail_ === 'function') ? fi_contactsLookupByEmail_(email2) : null;
-            var cand2 = {
-              fromCases: fromCases2,
-              fromContacts: fromContacts2,
-              fromLine: { line_id: known2.line_id, user_key: uk2 },
-              metaInMail: parsed && parsed.meta,
-            };
-            var r2 = resolveMetaWithPriority_(cand2, known2);
-            var m2 = r2 && r2.meta || {};
-            parsed.meta = parsed.meta || {};
-            parsed.meta.user_key = parsed.meta.user_key || m2.user_key || uk2 || parsed.meta.userKey || '';
-            parsed.meta.case_id  = normCaseId_(parsed.meta.case_id || parsed.meta.caseId || m2.case_id || known2.case_id || '');
-            parsed.meta.case_key = normCaseKey_(parsed.meta.case_key || parsed.meta.caseKey || m2.case_key || ((parsed.meta.user_key && parsed.meta.case_id) ? (String(parsed.meta.user_key).toLowerCase() + '-' + parsed.meta.case_id) : ''));
-            parsed.meta.line_id  = parsed.meta.line_id || m2.line_id || known2.line_id || '';
-            try { Logger.log('[Intake] adopt(by=%s,source=%s) candidates=%s', r2.by || '', r2.source || '', JSON.stringify(buildCandidates_(cand2))); } catch (_) {}
-          } catch (_) {}
           const fname = `intake__${meta.submission_id}.json`;
           const blob = Utilities.newBlob(JSON.stringify(parsed, null, 2), 'application/json', fname);
-          staging.createFile(blob);
+          const createdFile = staging.createFile(blob);
+          // write-through mover: 保存直後に可能ならケース直下へ移送（フォルダ未作成時は静かにスキップ）
+          try { if (typeof tryMoveIntakeToCase_ === 'function') tryMoveIntakeToCase_(parsed && parsed.meta, createdFile, fname); } catch (_) {}
           try {
             var candidatesEarlyJson = (function(){ try { return JSON.stringify(buildCandidates_(candEarly)); } catch(_) { return '[]'; } })();
             Logger.log(
@@ -967,22 +1194,33 @@ function run_ProcessInbox_AllForms() {
         };
 
         // メタ確定順: case_key → case_id → line_id（case_key を最優先で決定）
-        let resolvedCaseKey = caseInfo.caseKey && String(caseInfo.caseKey) ? String(caseInfo.caseKey) : '';
-        if (!resolvedCaseKey && (caseInfo.userKey || prepared.userKey)) {
-          const uk = caseInfo.userKey || prepared.userKey;
-          resolvedCaseKey = `${uk}-${caseId}`;
-        }
-        if (!resolvedCaseKey) {
+  let resolvedCaseKey = caseInfo.caseKey && String(caseInfo.caseKey) ? String(caseInfo.caseKey) : '';
+  if (!resolvedCaseKey && (caseInfo.userKey || prepared.userKey)) {
+    const uk = caseInfo.userKey || prepared.userKey;
+    resolvedCaseKey = `${uk}-${caseId}`;
+  }
+  if (!resolvedCaseKey) {
           resolvedCaseKey = drive_resolveCaseKeyFromMeta_(
             parsed?.meta || parsed?.META || {},
             fallbackInfo
           );
         }
-        if (!resolvedCaseKey && fallbackInfo.userKey) {
-          resolvedCaseKey = `${fallbackInfo.userKey}-${caseId}`;
-        }
+  if (!resolvedCaseKey && fallbackInfo.userKey) {
+    resolvedCaseKey = `${fallbackInfo.userKey}-${caseId}`;
+  }
 
-        const resolved_case_key = resolvedCaseKey;
+  // 2) 妥当性ガード（^[a-z0-9]{2,6}-\d{4}$ 以外は再生成）
+  function isValidCaseKey_(s) { return /^[a-z0-9]{2,6}-\d{4}$/.test(String(s||'')); }
+  let finalCaseKey = resolvedCaseKey;
+  if (!isValidCaseKey_(finalCaseKey)) {
+    const ukFix = (caseInfo.userKey || prepared.userKey || fallbackInfo.userKey || '').toString().slice(0,6).toLowerCase();
+    const cidFix = (typeof normCaseId_ === 'function') ? normCaseId_(caseId) : String(caseId||'').replace(/\D/g,'').padStart(4,'0');
+    if (ukFix && cidFix) finalCaseKey = `${ukFix}-${cidFix}`;
+  }
+  if (!isValidCaseKey_(finalCaseKey)) throw new Error('Unable to resolve case folder key');
+
+  // 3) 以降は finalCaseKey を唯一の真実に
+  const resolved_case_key = finalCaseKey;
 
         fallbackInfo.caseKey = resolved_case_key;
         fallbackInfo.case_key = resolved_case_key;
@@ -996,16 +1234,16 @@ function run_ProcessInbox_AllForms() {
           throw new Error('Unable to resolve case folder key');
         }
 
-        const caseFolder = drive_getOrCreateCaseFolderByKey_(resolved_case_key);
+        const caseFolder = drive_getOrCreateCaseFolderByKey_(finalCaseKey);
         const caseFolderId = caseFolder.getId();
         caseInfo.folderId = caseFolderId;
-        caseInfo.caseKey = resolved_case_key;
-        caseInfo.case_key = resolved_case_key;
+        caseInfo.caseKey = finalCaseKey;
+        caseInfo.case_key = finalCaseKey;
         const effectiveUserKey =
           caseInfo.userKey ||
           fallbackInfo.userKey ||
-          (resolved_case_key && resolved_case_key.indexOf('-') >= 0
-            ? resolved_case_key.split('-')[0]
+          (finalCaseKey && finalCaseKey.indexOf('-') >= 0
+            ? finalCaseKey.split('-')[0]
             : '');
         if (effectiveUserKey) {
           caseInfo.userKey = effectiveUserKey;
@@ -1017,8 +1255,8 @@ function run_ProcessInbox_AllForms() {
 
         if (parsed && parsed.meta) {
           if (!parsed.meta.case_id) parsed.meta.case_id = caseId;
-          if (!parsed.meta.case_key) parsed.meta.case_key = resolved_case_key;
-          if (!parsed.meta.caseKey) parsed.meta.caseKey = resolved_case_key;
+          if (!parsed.meta.case_key) parsed.meta.case_key = finalCaseKey;
+          if (!parsed.meta.caseKey) parsed.meta.caseKey = finalCaseKey;
           if (!parsed.meta.user_key && (caseInfo.userKey || caseInfo.user_key)) {
             parsed.meta.user_key = caseInfo.userKey || caseInfo.user_key;
           }
@@ -1030,7 +1268,7 @@ function run_ProcessInbox_AllForms() {
           Logger.log(
             '[Intake] allocated case_id=%s case_key=%s user_key=%s',
             case_id,
-            resolved_case_key,
+            finalCaseKey,
             caseInfo.userKey || caseInfo.user_key || ''
           );
         } catch (_) {}
@@ -1110,7 +1348,9 @@ function run_ProcessInbox_AllForms() {
           }
           const fname = `intake__${meta.submission_id}.json`;
           const blob = Utilities.newBlob(JSON.stringify(parsed, null, 2), 'application/json', fname);
-          staging.createFile(blob);
+          const createdFile = staging.createFile(blob);
+          // write-through mover: 保存直後に可能ならケース直下へ移送（フォルダ未作成時は静かにスキップ）
+          try { if (typeof tryMoveIntakeToCase_ === 'function') tryMoveIntakeToCase_(parsed && parsed.meta, createdFile, fname); } catch (_) {}
           try {
             var candidates2Json = (function(){ try { return JSON.stringify(buildCandidates_(cand2)); } catch(_) { return '[]'; } })();
             Logger.log(
@@ -1145,8 +1385,8 @@ function run_ProcessInbox_AllForms() {
             {
               caseId: caseId,
               case_id: case_id,
-              caseKey: resolved_case_key,
-              case_key: resolved_case_key,
+              caseKey: finalCaseKey,
+              case_key: finalCaseKey,
               userKey: caseInfo.userKey || caseInfo.user_key,
               user_key: caseInfo.userKey || caseInfo.user_key,
               lineId: caseInfo.lineId,
@@ -1165,7 +1405,7 @@ function run_ProcessInbox_AllForms() {
               submission_id: meta.submission_id || '',
               json_path: file_path,
               meta,
-              case_key: resolved_case_key,
+              case_key: finalCaseKey,
               user_key: caseInfo.userKey || caseInfo.user_key,
               line_id: caseInfo.lineId,
             });
@@ -1192,7 +1432,7 @@ function run_ProcessInbox_AllForms() {
               Logger.log('[Intake] afterSave error: %s', (e && e.stack) || e);
             }
           }
-          basePatch.case_key = resolved_case_key;
+          basePatch.case_key = finalCaseKey;
           basePatch.folder_id = caseFolderId;
           if (caseInfo.userKey || caseInfo.user_key) {
             basePatch.user_key = caseInfo.userKey || caseInfo.user_key;

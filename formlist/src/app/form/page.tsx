@@ -188,12 +188,18 @@ export default async function FormPage() {
             ? makeFormUrl(f.baseUrl, lineId!, caseId, {
                 redirectUrl: redirectForForm,
                 formId: f.formId,
+                lineIdQueryKeys: [],
+                caseIdQueryKeys: ['case_id'],
               })
-            : makeIntakeUrl(intakeBase, intakeRedirect);
+            : makeIntakeUrl(intakeBase, intakeRedirect, lineId!, {
+                formId: f.formId,
+              });
       } else if (caseReady && caseId) {
         signedHref = makeFormUrl(f.baseUrl, lineId!, caseId, {
           redirectUrl: redirectForForm,
           formId: f.formId,
+          lineIdQueryKeys: [],
+          caseIdQueryKeys: ['case_id'],
         });
       }
     }

@@ -13,6 +13,12 @@ const b64url = (s: string) => s.replace(/\+/g, '-').replace(/\//g, '_').replace(
 const b64urlFromString = (s: string) => b64url(Buffer.from(s, 'utf8').toString('base64'));
 const makePayload = (lineId: string, caseId: string, ts: string) => `${lineId}|${caseId}|${ts}`;
 const signV2 = (payload: string) => b64url(crypto.createHmac('sha256', SECRET).update(payload, 'utf8').digest('base64'));
+const normalizeCaseId = (raw: string) => {
+  if (!raw) return '';
+  const onlyDigits = raw.replace(/\D/g, '');
+  if (!onlyDigits) return '';
+  return onlyDigits.padStart(4, '0');
+};
 
 // 追加: originの安全取得（SSR/Edge/Browser全部OK）
 export function getOriginSafe(): string | undefined {
@@ -38,6 +44,8 @@ type MakeFormUrlOptions = {
   redirectUrl?: string; // 例: https://app.example/done?formId=309542
   formId?: string; // 表示用（署名には使わない）
   extra?: Record<string, string>;
+  lineIdQueryKeys?: string[]; // フォームが参照できるクエリ名（デフォルト: line_id）
+  caseIdQueryKeys?: string[]; // フォームが参照できるクエリ名（デフォルト: case_id）
 };
 
 /**
@@ -45,8 +53,9 @@ type MakeFormUrlOptions = {
  * その redirect_url を FormMailer 側の baseUrl にクエリで渡す。
  */
 export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opts: MakeFormUrlOptions = {}): string {
+  const normalizedCaseId = normalizeCaseId(caseId);
   const ts = tsSec(); // UNIX秒
-  const payload = makePayload(lineId, caseId, ts);
+  const payload = makePayload(lineId, normalizedCaseId, ts);
   const sig = signV2(payload);
   const p = b64urlFromString(payload);
 
@@ -54,7 +63,7 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opt
   const origin = getOriginSafe();
   const redirect = safeURL(opts?.redirectUrl ?? '/', origin);
   redirect.searchParams.set('lineId', lineId);
-  redirect.searchParams.set('caseId', caseId);
+  redirect.searchParams.set('caseId', normalizedCaseId);
   redirect.searchParams.set('ts', ts);
   redirect.searchParams.set('sig', sig);
   redirect.searchParams.set('p', p);
@@ -63,6 +72,14 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opt
 
   // 2) FormMailer 側のURLに、redirect_url を渡す
   const url = safeURL(baseUrl, origin);
+  const lineIdQueryKeys = opts.lineIdQueryKeys && opts.lineIdQueryKeys.length > 0 ? opts.lineIdQueryKeys : ['line_id'];
+  const caseIdQueryKeys = opts.caseIdQueryKeys && opts.caseIdQueryKeys.length > 0 ? opts.caseIdQueryKeys : ['case_id'];
+  lineIdQueryKeys.forEach((key) => {
+    if (key) url.searchParams.set(key, lineId);
+  });
+  caseIdQueryKeys.forEach((key) => {
+    if (key) url.searchParams.set(key, normalizedCaseId);
+  });
   url.searchParams.set('redirect_url', redirect.toString());
   url.searchParams.set('referrer', origin ?? '');
   return url.toString();
@@ -73,23 +90,36 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opt
  * intakeBase: intake の FormMailer URL
  * intakeRedirect: intake 完了後に戻す /done のURL
  */
-export function makeIntakeUrl(intakeBase: string, intakeRedirect: string): string {
+export function makeIntakeUrl(
+  intakeBase: string,
+  intakeRedirect: string,
+  lineId: string,
+  opts: {
+    formId?: string;
+    lineIdQueryKeys?: string[];
+  } = {}
+): string {
   const ts = tsSec(); // UNIX秒
-  const lineId = '';
-  const caseId = '';
-  const payload = makePayload(lineId, caseId, ts);
+  const normalizedCaseId = '';
+  const payload = makePayload(lineId || '', normalizedCaseId, ts);
   const sig = signV2(payload);
   const p = b64urlFromString(payload);
 
   const origin = getOriginSafe();
   const redirect = safeURL(intakeRedirect, origin);
-  redirect.searchParams.set('lineId', lineId);
-  redirect.searchParams.set('caseId', caseId);
+  redirect.searchParams.set('lineId', lineId || '');
+  redirect.searchParams.set('caseId', normalizedCaseId);
   redirect.searchParams.set('ts', ts);
   redirect.searchParams.set('sig', sig);
   redirect.searchParams.set('p', p);
+  if (opts.formId) redirect.searchParams.set('formId', opts.formId);
 
   const url = safeURL(intakeBase, origin);
+  const lineIdQueryKeys =
+    opts.lineIdQueryKeys && opts.lineIdQueryKeys.length > 0 ? opts.lineIdQueryKeys : ['line_id'];
+  lineIdQueryKeys.forEach((key) => {
+    if (key && lineId) url.searchParams.set(key, lineId);
+  });
   url.searchParams.set('redirect_url', redirect.toString());
   url.searchParams.set('referrer', origin ?? '');
   return url.toString();
@@ -103,14 +133,15 @@ export function buildIntakeRedirectUrl(
   caseId: string
 ): string {
   const ts = tsSec();
-  const payload = makePayload(lineId || '', caseId || '', ts);
+  const normalizedCaseId = normalizeCaseId(caseId || '');
+  const payload = makePayload(lineId || '', normalizedCaseId, ts);
   const sig = signV2(payload);
   const p = b64urlFromString(payload);
 
   const origin = getOriginSafe();
   const redirect = safeURL(intakeRedirect, origin);
   redirect.searchParams.set('lineId', lineId || '');
-  redirect.searchParams.set('caseId', caseId || '');
+  redirect.searchParams.set('caseId', normalizedCaseId);
   redirect.searchParams.set('ts', ts); // 秒
   redirect.searchParams.set('sig', sig);
   redirect.searchParams.set('p', p);

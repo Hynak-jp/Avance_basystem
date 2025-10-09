@@ -250,7 +250,7 @@ staging 吸い上げ
 - クライアント: ログイン直後に `/api/bootstrap` を 1 回叩く（冪等）
 - フォーム URL 付与: `makeFormUrl(base, lineId, caseId)`（サーバ専用）
   - 付与: `redirect_url` に `lineId/caseId/ts/p/sig`（V2）を載せる
-  - intake: `makeIntakeUrl(intakeBase, intakeRedirect)`（`caseId=''` で署名）
+- intake: `makeIntakeUrl(intakeBase, intakeRedirect, lineId)`（`caseId=''` で署名）
 
 ### 8.3 FormMailer 側（META テンプレート）
 

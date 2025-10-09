@@ -410,6 +410,7 @@ function statusApi_collectStaging_(lineId, caseId) {
     var appended = 0; // submissions 追記件数（診断ログ用）
     var moved = 0; // staging からの移送件数
     var attachReason = ''; // フェイルセーフ時の一致理由（line_id|email|case_id|case_key）
+    var foundNames = [];
     // userKey → 既存ケースフォルダの解決（作成はしない）
     var uk = '';
     try {
@@ -484,7 +485,10 @@ function statusApi_collectStaging_(lineId, caseId) {
                   user_key: uk,
                   line_id: lid,
                   submitted_at: new Date().toISOString(),
-                  status: 'received',
+                  status: 'intake',
+                  seq: '',
+                  referrer: foundMove && foundMove.name || '',
+                  redirect_url: '',
                 });
                 try { appended++; } catch (_) {}
               }
@@ -567,24 +571,28 @@ function statusApi_collectStaging_(lineId, caseId) {
             try { foundForThis.file.setTrashed(true); } catch (_) {}
           } catch (_) {}
           try { moved++; } catch (_) {}
-          // submissions 補填（重複ガード）
+          // submissions upsert（重複ガード）
           try {
             var nm2 = foundForThis.name;
             var subId = nm2 ? extractSubmissionId_(nm2) : '';
-            if (subId && typeof submissions_hasRow_ === 'function' && typeof submissions_appendRow === 'function') {
-              if (!submissions_hasRow_(subId, 'intake')) {
-                submissions_appendRow({
-                  submission_id: subId,
-                  form_key: 'intake',
-                  case_id: (ensureKey.match(/-(\d{4})$/) || [])[1] || cid,
-                  user_key: uk,
-                  line_id: lid,
-                  submitted_at: new Date().toISOString(),
-                  referrer: nm2 || '',
-                  status: 'received',
-                });
-                try { appended++; } catch (_) {}
-              }
+            if (subId && typeof upsertSubmission_ === 'function') {
+              var ensuredCid = (ensureKey.match(/-(\d{4})$/) || [])[1] || cid;
+              var normEnsuredCid = statusApi_normCaseId_(ensuredCid);
+              var nextSeq2 = 1;
+              try { nextSeq2 = (getLastSeq_(normEnsuredCid, 'intake') | 0) + 1; } catch (_) { nextSeq2 = 1; }
+              upsertSubmission_({
+                submission_id: subId,
+                form_key: 'intake',
+                case_id: normEnsuredCid,
+                user_key: uk,
+                line_id: lid,
+                submitted_at: new Date().toISOString(),
+                status: 'intake',
+                seq: nextSeq2,
+                referrer: nm2 || '',
+                redirect_url: '',
+              });
+              try { appended++; } catch (_) {}
             }
             if (typeof upsertCasesForms_ === 'function') {
               upsertCasesForms_({ case_id: (ensureKey.match(/-(\d{4})$/) || [])[1] || cid, form_key: 'intake', status: 'received', can_edit: false });
@@ -671,18 +679,21 @@ function statusApi_collectStaging_(lineId, caseId) {
           var nm = f.getName && f.getName();
           if (!nm || !/^intake__/i.test(nm)) continue;
           var subId = extractSubmissionId_(nm);
-          if (subId && !submissions_hasRow_(subId, 'intake')) {
-            submissions_appendRow({
+          if (subId && typeof upsertSubmission_ === 'function') {
+            var normCid3 = statusApi_normCaseId_(cid);
+            var nextSeq3 = 1;
+            try { nextSeq3 = (getLastSeq_(normCid3, 'intake') | 0) + 1; } catch (_) { nextSeq3 = 1; }
+            upsertSubmission_({
               submission_id: subId,
               form_key: 'intake',
-              case_id: cid,
+              case_id: normCid3,
               user_key: uk,
               line_id: lid,
               submitted_at: new Date().toISOString(),
-              seq: '',
+              status: 'intake',
+              seq: nextSeq3,
               referrer: nm,
               redirect_url: '',
-              status: 'received',
             });
             // 任意：cases_forms の整合を補完（進捗一覧の安定化）
             try {
@@ -741,7 +752,7 @@ function statusApi_collectStaging_(lineId, caseId) {
           try { jsFS = JSON.parse(txtFS||'{}'); } catch(_) { jsFS = {}; }
           var mFS = (jsFS && jsFS.meta) || {};
           var cidFS = String(mFS.case_id || jsFS.case_id || '').trim();
-          var cid4 = normCaseId_(cidFS || cid);
+          var cid4 = statusApi_normCaseId_(cidFS || cid);
           var okAttach = false;
           var ukeyFS_chk = (typeof drive_userKeyFromLineId_==='function') ? drive_userKeyFromLineId_(lid) : '';
           var mt3 = matchMetaToCase_(
@@ -759,9 +770,10 @@ function statusApi_collectStaging_(lineId, caseId) {
           }
             if (!okAttach) {
               if (cidFS && statusApi_normCaseId_(cidFS) === cid4) { okAttach = true; attachReason = 'case_id'; }
-              var ukeyFS_chk = (typeof drive_userKeyFromLineId_==='function') ? drive_userKeyFromLineId_(lid) : '';
-              if (!okAttach && ckeyFS0 && ukeyFS_chk) {
-                if (ckeyFS0 === (ukeyFS_chk + '-' + cid4)) { okAttach = true; attachReason = 'case_key'; }
+              var ukeyFS_chk2 = (typeof drive_userKeyFromLineId_==='function') ? drive_userKeyFromLineId_(lid) : '';
+              var ckeyFS0 = String(mFS.case_key || jsFS.case_key || '').trim().toLowerCase();
+              if (!okAttach && ckeyFS0 && ukeyFS_chk2) {
+                if (ckeyFS0 === (ukeyFS_chk2 + '-' + cid4)) { okAttach = true; attachReason = 'case_key'; }
               }
             }
             // 追加: 候補がユニーク1件なら開発用に救済（プロパティ ALLOW_UNIQUE_RESCUE=1 のときだけ）
@@ -824,8 +836,10 @@ function statusApi_collectStaging_(lineId, caseId) {
                       user_key: ukeyFS,
                       line_id: lid,
                       submitted_at: new Date().toISOString(),
+                      status: 'intake',
+                      seq: '',
                       referrer: jsonNameFS,
-                      status: 'received',
+                      redirect_url: '',
                     });
                     appended++;
                   }
@@ -1205,24 +1219,32 @@ function recordSubmission_(payload) {
   }
 
   let last = 0;
+  const caseIdNorm = statusApi_normCaseId_(caseId);
   try {
-    if (typeof getLastSeq_ === 'function') last = Number(getLastSeq_(caseId, formKey)) || 0;
+    if (typeof getLastSeq_ === 'function') last = Number(getLastSeq_(caseIdNorm, formKey)) || 0;
   } catch (err) {
     last = 0;
   }
   const receivedAt = payload.received_at
     ? new Date(payload.received_at).toISOString()
     : new Date().toISOString();
-  if (typeof insertSubmission_ === 'function') {
-    insertSubmission_({
-      case_id: caseId,
+  if (typeof upsertSubmission_ === 'function') {
+    upsertSubmission_({
+      case_id: caseIdNorm,
       case_key: caseKey,
       form_key: formKey,
-      seq: last + 1,
+      seq: (payload.seq != null && payload.seq !== '') ? Number(payload.seq) : (last + 1),
       submission_id: submissionId,
       received_at: receivedAt,
       supersedes_seq: last || '',
       json_path: payload.json_path || '',
+      // 追加カラム（あれば埋める）
+      user_key: payload.user_key || '',
+      line_id: payload.line_id || '',
+      submitted_at: payload.submitted_at || receivedAt,
+      status: payload.status || formKey,
+      referrer: (payload && payload.meta && payload.meta.referrer) || payload.referrer || '',
+      redirect_url: (payload && payload.meta && payload.meta.redirect_url) || payload.redirect_url || '',
     });
   }
   if (typeof upsertCasesForms_ === 'function') {
