@@ -249,7 +249,7 @@ staging 吸い上げ
   - 環境変数: `GAS_ENDPOINT`, `BOOTSTRAP_SECRET`（or `TOKEN_SECRET`）
 - クライアント: ログイン直後に `/api/bootstrap` を 1 回叩く（冪等）
 - フォーム URL 付与: `makeFormUrl(base, lineId, caseId)`（サーバ専用）
-  - 付与: `redirect_url` に `lineId/caseId/ts/p/sig`（V2）を載せる
+  - 付与: `redirect_url[0]` に `lineId/caseId/ts/p/sig`（V2）を載せる
 - intake: `makeIntakeUrl(intakeBase, intakeRedirect, lineId)`（`caseId=''` で署名）
 
 ### 8.3 FormMailer 側（META テンプレート）

@@ -117,7 +117,7 @@ BAS\_提出書類/
     - `/api/bootstrap`（GAS: action=bootstrap）、`/api/status`（GAS: action=status）
   - V1（互換・POST/一部GET）: `sig = HEX(HMAC_SHA256(`${ts}.${lineId}.${caseId}`))`
     - `action=intake_complete` など既存互換用途で併用
-  - フォーム URL（外部 FormMailer への遷移）: `makeFormUrl` が V2 署名を生成し、`redirect_url` に `p/ts/sig/lineId/caseId` を付与
+- フォーム URL（外部 FormMailer への遷移）: `makeFormUrl` が V2 署名を生成し、`redirect_url[0]` に `p/ts/sig/lineId/caseId` を付与
 
 ### 5.x メール取り込みガード（共通）
 

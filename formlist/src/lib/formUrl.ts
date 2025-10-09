@@ -46,6 +46,8 @@ type MakeFormUrlOptions = {
   extra?: Record<string, string>;
   lineIdQueryKeys?: string[]; // フォームが参照できるクエリ名（デフォルト: line_id）
   caseIdQueryKeys?: string[]; // フォームが参照できるクエリ名（デフォルト: case_id）
+  redirectUrlQueryKey?: string; // FormMailer 側の redirect_url 指定キー（デフォルト: redirect_url[0]）
+  referrerQueryKey?: string; // FormMailer 側の referrer 指定キー（デフォルト: referrer[0]）
 };
 
 /**
@@ -72,16 +74,20 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opt
 
   // 2) FormMailer 側のURLに、redirect_url を渡す
   const url = safeURL(baseUrl, origin);
-  const lineIdQueryKeys = opts.lineIdQueryKeys && opts.lineIdQueryKeys.length > 0 ? opts.lineIdQueryKeys : ['line_id'];
-  const caseIdQueryKeys = opts.caseIdQueryKeys && opts.caseIdQueryKeys.length > 0 ? opts.caseIdQueryKeys : ['case_id'];
+  const lineIdQueryKeys =
+    opts.lineIdQueryKeys && opts.lineIdQueryKeys.length > 0 ? opts.lineIdQueryKeys : ['line_id[0]'];
+  const caseIdQueryKeys =
+    opts.caseIdQueryKeys && opts.caseIdQueryKeys.length > 0 ? opts.caseIdQueryKeys : ['case_id[0]'];
+  const redirectUrlQueryKey = opts.redirectUrlQueryKey ?? 'redirect_url[0]';
+  const referrerQueryKey = opts.referrerQueryKey ?? 'referrer[0]';
   lineIdQueryKeys.forEach((key) => {
     if (key) url.searchParams.set(key, lineId);
   });
   caseIdQueryKeys.forEach((key) => {
-    if (key) url.searchParams.set(key, normalizedCaseId);
+    if (key && normalizedCaseId) url.searchParams.set(key, normalizedCaseId);
   });
-  url.searchParams.set('redirect_url', redirect.toString());
-  url.searchParams.set('referrer', origin ?? '');
+  if (redirectUrlQueryKey) url.searchParams.set(redirectUrlQueryKey, redirect.toString());
+  if (referrerQueryKey) url.searchParams.set(referrerQueryKey, origin ?? '');
   return url.toString();
 }
 
@@ -97,6 +103,8 @@ export function makeIntakeUrl(
   opts: {
     formId?: string;
     lineIdQueryKeys?: string[];
+    redirectUrlQueryKey?: string;
+    referrerQueryKey?: string;
   } = {}
 ): string {
   const ts = tsSec(); // UNIX秒
@@ -116,12 +124,14 @@ export function makeIntakeUrl(
 
   const url = safeURL(intakeBase, origin);
   const lineIdQueryKeys =
-    opts.lineIdQueryKeys && opts.lineIdQueryKeys.length > 0 ? opts.lineIdQueryKeys : ['line_id'];
+    opts.lineIdQueryKeys && opts.lineIdQueryKeys.length > 0 ? opts.lineIdQueryKeys : ['line_id[0]'];
+  const redirectUrlQueryKey = opts.redirectUrlQueryKey ?? 'redirect_url[0]';
+  const referrerQueryKey = opts.referrerQueryKey ?? 'referrer[0]';
   lineIdQueryKeys.forEach((key) => {
     if (key && lineId) url.searchParams.set(key, lineId);
   });
-  url.searchParams.set('redirect_url', redirect.toString());
-  url.searchParams.set('referrer', origin ?? '');
+  if (redirectUrlQueryKey) url.searchParams.set(redirectUrlQueryKey, redirect.toString());
+  if (referrerQueryKey) url.searchParams.set(referrerQueryKey, origin ?? '');
   return url.toString();
 }
 
@@ -147,7 +157,7 @@ export function buildIntakeRedirectUrl(
   redirect.searchParams.set('p', p);
 
   const url = safeURL(intakeBase, origin);
-  url.searchParams.set('redirect_url', redirect.toString());
-  url.searchParams.set('referrer', origin ?? '');
+  url.searchParams.set('redirect_url[0]', redirect.toString());
+  url.searchParams.set('referrer[0]', origin ?? '');
   return url.toString();
 }

@@ -78,7 +78,7 @@ formlist/
 │ ├─ auth.ts # NextAuth 設定（LINE プロバイダ）
 │ ├─ callGas.ts # GAS WebApp を叩くヘルパ（現状は未使用）
 │ ├─ progressStore.ts # フォーム進捗（Zustand + localStorage）
-│ ├─ formUrl.ts # 署名付きフォームURL生成（サーバ専用 / V2: base64url, payload=lineId|caseId|ts を redirect_url に付与）
+│ ├─ formUrl.ts # 署名付きフォームURL生成（サーバ専用 / V2: base64url, payload=lineId|caseId|ts を redirect_url[0] に付与）
 │ └─ utils.ts
 ├─ src/types/next-auth.d.ts # Session/JWT 拡張（lineId 等）
 ├─ middleware.ts # /form への直接アクセスを /login へ誘導（lineId Cookie 前提）
@@ -90,7 +90,7 @@ formlist/
 
 - LINE での認証（NextAuth + LINE）。JWT に `lineId` を格納
 - フォーム一覧 `/form` で必要フォームを列挙し、外部 FormMailer へ遷移
-  - 遷移 URL には `line_id[0]`, `form_id`, `redirect_url=/done?formId=...` を付与
+- 遷移 URL には `line_id[0]`, `form_id`, `case_id[0]`, `redirect_url[0]=/done?formId=...` を付与
   - `/done` 受信でローカル進捗を `done` に更新 → `/form` へ戻す
 - `/api/extract` は GAS からの画像抽出要求を受け、OpenAI Chat Completions で JSON を返す
 - `/api/status` と `/api/intake/complete` で intake ゲートを管理（採番は intake 完了時）

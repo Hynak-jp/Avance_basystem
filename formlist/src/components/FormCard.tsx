@@ -48,7 +48,7 @@ export default function FormCard({
         if (formKey) redirectUrl.searchParams.set('formKey', formKey);
         url.searchParams.set('line_id[0]', lineId);
         url.searchParams.set('form_id', formId);
-        url.searchParams.set('redirect_url', redirectUrl.toString());
+        url.searchParams.set('redirect_url[0]', redirectUrl.toString());
         return url.toString();
       })();
   const signedHref = hrefOverride ?? fallback;
