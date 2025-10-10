@@ -46,11 +46,11 @@ export default function DoneClient({ lineId }: { lineId: string }) {
               if (sigParam) statusParams.set('sig', sigParam);
               if (caseIdParam) statusParams.set('caseId', caseIdParam);
               statusParams.set('lineId', lineId);
-              fetch(`/api/status?${statusParams.toString()}`, {
+              await fetch(`/api/status?${statusParams.toString()}`, {
                 method: 'GET',
                 headers: { 'x-line-id': lineId },
                 cache: 'no-store',
-              }).catch(() => {});
+              });
             } catch {}
             store.setStatus(storeKey, 'done');
             if (formId && formId !== storeKey) store.setStatus(formId, 'done');
@@ -75,11 +75,27 @@ export default function DoneClient({ lineId }: { lineId: string }) {
         if (lineId) ackParams.set('lineId', lineId);
         if (formId && !ackParams.has('formId')) ackParams.set('formId', formId);
         try {
-          fetch(`/api/status?${ackParams.toString()}`, { method: 'GET', cache: 'no-store' }).catch(() => {});
+          await fetch(`/api/status?${ackParams.toString()}`, { method: 'GET', cache: 'no-store' });
         } catch (e) {
           console.error('form_ack error', e);
         }
       }
+
+      const statusParams = new URLSearchParams();
+      statusParams.set('action', 'status');
+      statusParams.set('bust', '1');
+      if (pParam) statusParams.set('p', pParam);
+      if (tsParam) statusParams.set('ts', tsParam);
+      if (sigParam) statusParams.set('sig', sigParam);
+      if (caseIdParam) statusParams.set('caseId', caseIdParam);
+      statusParams.set('lineId', lineId);
+      try {
+        await fetch(`/api/status?${statusParams.toString()}`, {
+          method: 'GET',
+          headers: { 'x-line-id': lineId },
+          cache: 'no-store',
+        });
+      } catch {}
       store.setStatus(storeKey, 'done');
       if (formId && formId !== storeKey) store.setStatus(formId, 'done');
       if (formKeyParam && formKeyParam !== storeKey) store.setStatus(formKeyParam, 'done');

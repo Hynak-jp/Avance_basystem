@@ -48,14 +48,23 @@ function statusApi_formsFromSubmissions_(caseId) {
     var reopenAtEpochIdx = idx['reopened_at_epoch'] != null ? idx['reopened_at_epoch'] : idx['reopenedAtEpoch'];
     var reopenUntilEpochIdx = idx['reopen_until_epoch'] != null ? idx['reopen_until_epoch'] : idx['reopenUntilEpoch'];
     var rows = sh.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    var aliasMap = {
+      s2002: 's2002_userform',
+      s2002_form: 's2002_userform',
+      s2002_userform: 's2002_userform',
+    };
     var want = statusApi_normCaseId_(caseId);
     var map = Object.create(null);
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i];
       var rowCase = statusApi_normCaseId_(row[ci]);
       if (!rowCase || rowCase !== want) continue;
-      var formKey = String(row[fi] || '').trim();
-      if (!formKey) continue;
+      var rawFormKey = String(row[fi] || '').trim();
+      var canonicalKey = rawFormKey;
+      var normalizedKey = rawFormKey.toLowerCase().replace(/[\s-]+/g, '_');
+      if (aliasMap[normalizedKey]) canonicalKey = aliasMap[normalizedKey];
+      if (!canonicalKey) continue;
+      var formKey = canonicalKey;
       var seq = seqIdx != null ? Number(row[seqIdx] || 0) || 0 : 0;
       var status = statusIdx != null ? String(row[statusIdx] || '').trim() : '';
       if (!status || status.toLowerCase() === formKey.toLowerCase()) status = 'submitted';
@@ -621,7 +630,7 @@ function statusApi_collectStaging_(lineId, caseId) {
                   user_key: uk,
                   line_id: lid,
                   submitted_at: new Date().toISOString(),
-                  status: 'intake',
+                  status: 'received',
                   seq: '',
                   referrer: foundMove && foundMove.name || '',
                   redirect_url: '',
@@ -713,27 +722,24 @@ function statusApi_collectStaging_(lineId, caseId) {
             try { moved++; } catch (_) {}
             // submissions upsert（重複ガード）
             try {
-              var nm2 = foundForThis.name;
-              var subId = nm2 ? extractSubmissionId_(nm2) : '';
-              if (subId && typeof upsertSubmission_ === 'function') {
-                var ensuredCid = (ensureKey.match(/-(\d{4})$/) || [])[1] || cid;
-                var normEnsuredCid = statusApi_normCaseId_(ensuredCid);
-                var nextSeq2 = 1;
-                try { nextSeq2 = (getLastSeq_(normEnsuredCid, 'intake') | 0) + 1; } catch (_) { nextSeq2 = 1; }
-                upsertSubmission_({
-                  submission_id: subId,
-                  form_key: 'intake',
-                  case_id: normEnsuredCid,
-                  user_key: uk,
-                  line_id: lid,
-                  submitted_at: new Date().toISOString(),
-                  status: 'intake',
-                  seq: nextSeq2,
-                  referrer: nm2 || '',
-                  redirect_url: '',
-                });
-                try { appended++; } catch (_) {}
-              }
+            var nm2 = foundForThis.name;
+            var subId = nm2 ? extractSubmissionId_(nm2) : '';
+            if (subId && typeof upsertSubmission_ === 'function') {
+              var ensuredCid = (ensureKey.match(/-(\d{4})$/) || [])[1] || cid;
+              var normEnsuredCid = statusApi_normCaseId_(ensuredCid);
+              upsertSubmission_({
+                submission_id: subId,
+                form_key: 'intake',
+                case_id: normEnsuredCid,
+                user_key: uk,
+                line_id: lid,
+                submitted_at: new Date().toISOString(),
+                status: 'received',
+                referrer: nm2 || '',
+                redirect_url: '',
+              });
+              try { appended++; } catch (_) {}
+            }
             } catch (_) {}
             // 限定ensureによりフォルダを起こした直後に、contacts/cases も揃える
             try { statusApi_ensureActiveCaseIdString_(lid, (ensureKey.match(/-(\d{4})$/) || [])[1] || cid); } catch (_) {}
@@ -964,7 +970,7 @@ function statusApi_collectStaging_(lineId, caseId) {
                       user_key: ukeyFS,
                       line_id: lid,
                       submitted_at: new Date().toISOString(),
-                      status: 'intake',
+                      status: 'received',
                       seq: '',
                       referrer: jsonNameFS,
                       redirect_url: '',
@@ -1414,30 +1420,36 @@ function statusApi_handleIntakeAck_(params) {
     } catch (_) {}
   }
 
-  var nextSeq = 1;
-  try {
-    if (typeof getLastSeq_ === 'function') {
-      nextSeq = (getLastSeq_(normCaseId, 'intake') | 0) + 1;
-      if (!(nextSeq > 0)) nextSeq = 1;
-    }
-  } catch (_) {
-    nextSeq = 1;
-  }
-
   var submissionId = String(p.submission_id || p.submissionId || '').trim();
   if (!submissionId) submissionId = 'ack:' + normCaseId + ':intake';
+  var existingAck = false;
+  try {
+    if (typeof sheetsRepo_hasSubmission_ === 'function') {
+      existingAck = sheetsRepo_hasSubmission_(normCaseId, 'intake', submissionId);
+    }
+  } catch (_) {}
+
+  var nextSeq = 1;
+  if (!existingAck) {
+    try {
+      if (typeof getLastSeq_ === 'function') {
+        nextSeq = (getLastSeq_(normCaseId, 'intake') | 0) + 1;
+        if (!(nextSeq > 0)) nextSeq = 1;
+      }
+    } catch (_) {
+      nextSeq = 1;
+    }
+  }
   var nowIso = new Date().toISOString();
 
   if (typeof upsertSubmission_ === 'function') {
-    upsertSubmission_({
+    var payloadAck = {
       submission_id: submissionId,
       form_key: 'intake',
       case_id: normCaseId,
       user_key: userKey,
       case_key: caseKey,
       line_id: lineId,
-      seq: nextSeq,
-      supersedes_seq: nextSeq > 1 ? String(nextSeq - 1) : '',
       status: 'received',
       submitted_at: nowIso,
       received_at: nowIso,
@@ -1450,7 +1462,12 @@ function statusApi_handleIntakeAck_(params) {
       locked_reason: '',
       can_edit: false,
       reopened_by: '',
-    });
+    };
+    if (!existingAck) {
+      payloadAck.seq = nextSeq;
+      if (nextSeq > 1) payloadAck.supersedes_seq = String(nextSeq - 1);
+    }
+    upsertSubmission_(payloadAck);
   }
 
   ensureSubmissionsCaseIdTextFormat_();
@@ -1458,6 +1475,8 @@ function statusApi_handleIntakeAck_(params) {
   try {
     CacheService.getScriptCache().remove('status:' + normCaseId);
   } catch (_) {}
+
+  try { Logger.log('[ack] type=intake case=%s submission=%s status=received seq=%s', normCaseId, submissionId, existingAck ? 'kept' : String(nextSeq)); } catch (_) {}
 
   return statusApi_jsonOut_({ ok: true, caseId: normCaseId, case_id: normCaseId }, 200);
 }
@@ -1515,29 +1534,35 @@ function statusApi_handleFormAck_(params) {
   }
 
   var caseKey = userKey ? userKey + '-' + normCaseId : '';
-  var nextSeq = 1;
-  try {
-    if (typeof getLastSeq_ === 'function') {
-      nextSeq = (getLastSeq_(normCaseId, formKey) | 0) + 1;
-      if (!(nextSeq > 0)) nextSeq = 1;
-    }
-  } catch (_) {
-    nextSeq = 1;
-  }
-
   var submissionId = String(p.submission_id || p.submissionId || '').trim();
   if (!submissionId) submissionId = 'ack:' + normCaseId + ':' + formKey;
+  var existingAck = false;
+  try {
+    if (typeof sheetsRepo_hasSubmission_ === 'function') {
+      existingAck = sheetsRepo_hasSubmission_(normCaseId, formKey, submissionId);
+    }
+  } catch (_) {}
+
+  var nextSeq = 1;
+  if (!existingAck) {
+    try {
+      if (typeof getLastSeq_ === 'function') {
+        nextSeq = (getLastSeq_(normCaseId, formKey) | 0) + 1;
+        if (!(nextSeq > 0)) nextSeq = 1;
+      }
+    } catch (_) {
+      nextSeq = 1;
+    }
+  }
   var nowIso = new Date().toISOString();
   if (typeof upsertSubmission_ === 'function') {
-    upsertSubmission_({
+    var payloadAck = {
       submission_id: submissionId,
       form_key: formKey,
       case_id: normCaseId,
       user_key: userKey,
       case_key: caseKey,
       line_id: lineId,
-      seq: nextSeq,
-      supersedes_seq: nextSeq > 1 ? String(nextSeq - 1) : '',
       status: 'received',
       submitted_at: nowIso,
       received_at: nowIso,
@@ -1550,7 +1575,12 @@ function statusApi_handleFormAck_(params) {
       locked_reason: '',
       can_edit: false,
       reopened_by: '',
-    });
+    };
+    if (!existingAck) {
+      payloadAck.seq = nextSeq;
+      if (nextSeq > 1) payloadAck.supersedes_seq = String(nextSeq - 1);
+    }
+    upsertSubmission_(payloadAck);
   }
 
   ensureSubmissionsCaseIdTextFormat_();
@@ -1558,6 +1588,8 @@ function statusApi_handleFormAck_(params) {
   try {
     CacheService.getScriptCache().remove('status:' + normCaseId);
   } catch (_) {}
+
+  try { Logger.log('[ack] type=form case=%s form=%s submission=%s status=received seq=%s', normCaseId, formKey, submissionId, existingAck ? 'kept' : String(nextSeq)); } catch (_) {}
 
   return statusApi_jsonOut_({ ok: true, caseId: normCaseId, case_id: normCaseId }, 200);
 }
@@ -1731,6 +1763,10 @@ function recordSubmission_(payload) {
     caseKey = head + '-' + caseId;
   }
 
+  var normalizedUserKey = normalizeUserKey_(payload.user_key || payload.userKey || '');
+  if (normalizedUserKey) fallbackInfo.userKey = normalizedUserKey;
+  payload.user_key = normalizedUserKey;
+
   // 既存フォルダの参照のみ（作成しない）
   let caseFolderId = '';
   try {
@@ -1779,12 +1815,13 @@ function recordSubmission_(payload) {
   const receivedAt = payload.received_at
     ? new Date(payload.received_at).toISOString()
     : new Date().toISOString();
+  const submittedAt = payload.submitted_at
+    ? new Date(payload.submitted_at).toISOString()
+    : receivedAt;
   if (typeof upsertSubmission_ === 'function') {
-    var statusValue = payload.status;
-    if (!statusValue || String(statusValue).trim().length === 0) {
-      statusValue = formKey === 'intake' ? 'received' : formKey;
-    }
-    if (formKey === 'intake' && String(statusValue).toLowerCase() === formKey.toLowerCase()) {
+    let statusValue = '';
+    if (payload.status != null) statusValue = String(payload.status).trim();
+    if (!statusValue || statusValue.toLowerCase() === formKey.toLowerCase()) {
       statusValue = 'received';
     }
     upsertSubmission_({
@@ -1797,9 +1834,9 @@ function recordSubmission_(payload) {
       supersedes_seq: last || '',
       json_path: payload.json_path || '',
       // 追加カラム（あれば埋める）
-      user_key: payload.user_key || '',
+      user_key: normalizedUserKey,
       line_id: payload.line_id || '',
-      submitted_at: payload.submitted_at || receivedAt,
+      submitted_at: submittedAt,
       status: statusValue,
       referrer: (payload && payload.meta && payload.meta.referrer) || payload.referrer || '',
       redirect_url: (payload && payload.meta && payload.meta.redirect_url) || payload.redirect_url || '',

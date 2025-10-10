@@ -34,6 +34,17 @@ const SHEETS_REPO_SUBMISSIONS_HEADERS = [
   // 追加カラム（存在しなければ自動で増設）
   'referrer',
   'redirect_url',
+  'status',
+  'user_key',
+  'line_id',
+  'submitted_at',
+  'reopened_at',
+  'reopened_by',
+  'reopen_until',
+  'locked_reason',
+  'can_edit',
+  'reopened_at_epoch',
+  'reopen_until_epoch',
 ];
 
 function sheetsRepo_aliases_(key) {
@@ -119,81 +130,41 @@ function sheetsRepo_readAll_(sheetName, headers) {
 }
 
 function upsertCasesForms_(row) {
-  const caseIdRaw = sheetsRepo_getValue_(row, 'case_id');
-  const formKeyRaw = sheetsRepo_getValue_(row, 'form_key');
-  if (!caseIdRaw || !formKeyRaw) {
-    throw new Error('upsertCasesForms_: case_id and form_key are required');
-  }
-  const caseId = String(caseIdRaw).trim();
-  const formKey = String(formKeyRaw).trim();
-  const sheet = sheetsRepo_ensureSheet_(SHEETS_REPO_CASES_FORMS, SHEETS_REPO_CASES_FORMS_HEADERS);
-  const headers = SHEETS_REPO_CASES_FORMS_HEADERS;
-  const lastRow = sheet.getLastRow();
-  const lastCol = Math.max(sheet.getLastColumn(), headers.length);
-  let targetRow = -1;
-  if (lastRow >= 2) {
-    const range = sheet.getRange(2, 1, lastRow - 1, lastCol);
-    const values = range.getValues();
-    const caseIdx = headers.indexOf('case_id');
-    const formIdx = headers.indexOf('form_key');
-    for (let i = 0; i < values.length; i++) {
-      const rowCase = String(values[i][caseIdx] || '').trim();
-      const rowForm = String(values[i][formIdx] || '').trim();
-      if (rowCase === caseId && rowForm === formKey) {
-        targetRow = i + 2;
-        break;
-      }
-    }
-  }
-
-  const baseRecord = {
-    status: '',
-    can_edit: false,
-    reopened_at: '',
-    reopened_by: '',
-    locked_reason: '',
-    reopen_until: '',
-    updated_at: new Date().toISOString(),
-  };
-
-  const normalized = {};
-  headers.forEach(function (key) {
-    const incoming = sheetsRepo_getValue_(row, key);
-    if (incoming !== undefined && incoming !== null) {
-      normalized[key] = incoming;
-    }
-  });
-
-  normalized['case_id'] = caseId;
-  normalized['form_key'] = formKey;
-  normalized['updated_at'] = new Date().toISOString();
-
-  const payload = Object.assign({}, baseRecord, normalized);
-
-  if (targetRow > 0) {
-    const currentValues = sheet.getRange(targetRow, 1, 1, lastCol).getValues()[0];
-    const merged = headers.map(function (key, idx) {
-      const incoming = Object.prototype.hasOwnProperty.call(payload, key) ? payload[key] : undefined;
-      if (incoming === undefined || incoming === null || incoming === '') {
-        return currentValues[idx];
-      }
-      return incoming;
-    });
-    sheet.getRange(targetRow, 1, 1, headers.length).setValues([merged]);
-  } else {
-    const ordered = headers.map(function (key) {
-      return Object.prototype.hasOwnProperty.call(payload, key) ? payload[key] : '';
-    });
-    sheet.appendRow(ordered);
-  }
+  try { Logger.log('upsertCasesForms_: skipped (cases_forms disabled) %s', JSON.stringify(row || {})); } catch (_) {}
+  return null;
 }
 
 function getCaseForms_(caseId) {
   if (!caseId) return [];
   const want = String(caseId).trim();
-  return sheetsRepo_readAll_(SHEETS_REPO_CASES_FORMS, SHEETS_REPO_CASES_FORMS_HEADERS).filter(function (row) {
-    return String(sheetsRepo_getValue_(row, 'case_id') || '').trim() === want;
-  });
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const sid = props.getProperty('BAS_MASTER_SPREADSHEET_ID') || props.getProperty('SHEET_ID');
+    if (!sid) return [];
+    const ss = SpreadsheetApp.openById(sid);
+    const sheet = ss.getSheetByName(SHEETS_REPO_CASES_FORMS);
+    if (!sheet) return [];
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return [];
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+    const idx = (typeof bs_toIndexMap_ === 'function') ? bs_toIndexMap_(headers) : {};
+    const ci = idx['case_id'] != null ? idx['case_id'] : idx['caseId'];
+    if (!(ci >= 0)) return [];
+    const rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    return rows
+      .filter(function (row) {
+        return String(row[ci] || '').trim() === want;
+      })
+      .map(function (row) {
+        const out = {};
+        headers.forEach(function (key, idxCol) {
+          sheetsRepo_assignAliases_(out, key, row[idxCol]);
+        });
+        return out;
+      });
+  } catch (_) {
+    return [];
+  }
 }
 
 function getLastSeq_(caseId, form_key) {
@@ -205,14 +176,16 @@ function getLastSeq_(caseId, form_key) {
   const idx = (typeof bs_toIndexMap_ === 'function') ? bs_toIndexMap_(header) : {};
   const ci = idx['case_id'], fi = idx['form_key'], qi = idx['seq'];
   if (!(fi >= 0 && qi >= 0)) return 0;
-  const wantCase = String(caseId).trim();
+  const wantCase = normalizeCaseId_(caseId);
   const wantForm = String(form_key).trim();
   const rows = sheet.getRange(2, 1, lastRow - 1, header.length).getValues();
   let max = 0;
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const okForm = String(row[fi] || '').trim() === wantForm;
-    const okCase = (ci == null) ? true : String(row[ci] || '').trim() === wantCase;
+    const okCase = (ci == null)
+      ? true
+      : normalizeCaseId_(row[ci] || '') === wantCase;
     if (okForm && okCase) {
       const n = Number(row[qi] || 0);
       if (Number.isFinite(n) && n > max) max = n;
@@ -227,12 +200,20 @@ function insertSubmission_(row) {
   if (!caseIdRaw || !formKeyRaw) {
     throw new Error('insertSubmission_: missing case_id or form_key');
   }
+  const normalizedCaseId = normalizeCaseId_(caseIdRaw);
+  const userKeyRaw = sheetsRepo_getValue_(row, 'user_key');
+  const normalizedUserKey = normalizeUserKey_(userKeyRaw);
   const sheet = sheetsRepo_ensureSheet_(SHEETS_REPO_SUBMISSIONS, SHEETS_REPO_SUBMISSIONS_HEADERS);
-  const headers = SHEETS_REPO_SUBMISSIONS_HEADERS;
+  ensureSubmissionColumns_(sheet, SHEETS_REPO_SUBMISSIONS_HEADERS);
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
   const normalized = Object.assign({}, row, {
-    case_id: String(caseIdRaw).trim(),
+    case_id: normalizedCaseId,
     form_key: String(formKeyRaw).trim(),
+    user_key: normalizedUserKey,
   });
+  if (!normalized.case_key && normalized.case_id && normalized.user_key) {
+    normalized.case_key = normalized.user_key + '-' + normalized.case_id;
+  }
   const ordered = headers.map(function (key) {
     const value = sheetsRepo_getValue_(normalized, key);
     return value !== undefined && value !== null ? value : '';
@@ -248,12 +229,12 @@ function upsertSubmission_(row) {
   if (!caseIdRaw || !formKeyRaw || !submissionIdRaw) {
     throw new Error('upsertSubmission_: missing case_id/form_key/submission_id');
   }
+  const normalizedCaseId = normalizeCaseId_(caseIdRaw);
+  const userKeyRaw = sheetsRepo_getValue_(row, 'user_key');
+  const normalizedUserKey = normalizeUserKey_(userKeyRaw);
   const sheet = sheetsRepo_ensureSheet_(SHEETS_REPO_SUBMISSIONS, SHEETS_REPO_SUBMISSIONS_HEADERS);
   // 足りない列を保証（列ズレ防止）
-  ensureSubmissionColumns_(sheet, [
-    'submission_id','form_key','case_id','user_key','line_id',
-    'submitted_at','seq','referrer','redirect_url','status','json_path','case_key','received_at','supersedes_seq'
-  ]);
+  ensureSubmissionColumns_(sheet, SHEETS_REPO_SUBMISSIONS_HEADERS);
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(function(v){return String(v||'').trim();});
   const idx = bs_toIndexMap_(headers);
   const lastRow = sheet.getLastRow();
@@ -271,12 +252,15 @@ function upsertSubmission_(row) {
     }
   }
   // 正規化（case_id/form_key は snake に揃える）
-  const normCaseId = (v) => (typeof bs_normCaseId_ === 'function') ? bs_normCaseId_(v) : String(v||'').replace(/\D/g,'').padStart(4,'0');
   const normalized = Object.assign({}, row, {
-    case_id: normCaseId(caseIdRaw),
+    case_id: normalizedCaseId,
     form_key: String(formKeyRaw).trim(),
     submission_id: String(submissionIdRaw).trim(),
+    user_key: normalizedUserKey,
   });
+  if (!normalized.case_key && normalized.case_id && normalized.user_key) {
+    normalized.case_key = normalized.user_key + '-' + normalized.case_id;
+  }
   if (foundRow > 0) {
     const current = sheet.getRange(foundRow, 1, 1, headers.length).getValues()[0];
     headers.forEach(function (key, colIdx) {
@@ -312,15 +296,18 @@ function lookupCaseIdByLineId_(lineId) {
   if (lastRow < 2) return null;
   const lastCol = sheet.getLastColumn();
   const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
-  const idx = bs_toIndexMap_(headers);
-  if (!(idx.lineId >= 0 && idx.caseId >= 0)) return null;
+  const idx = (typeof bs_toIndexMap_ === 'function') ? bs_toIndexMap_(headers) : {};
+  const li = idx['line_id'] != null ? idx['line_id'] : idx['lineId'];
+  const ci = idx['case_id'] != null ? idx['case_id'] : idx['caseId'];
+  if (!(li >= 0 && ci >= 0)) return null;
   const rows = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  const want = String(lineId).trim();
   for (let i = 0; i < rows.length; i++) {
-    const rowLine = String(rows[i][idx.lineId] || '').trim();
+    const rowLine = String(rows[i][li] || '').trim();
     if (!rowLine) continue;
-    if (rowLine === String(lineId).trim()) {
-      const rawCase = rows[i][idx.caseId];
-      return typeof bs_normCaseId_ === 'function' ? bs_normCaseId_(rawCase) : rawCase;
+    if (rowLine === want) {
+      const rawCase = rows[i][ci];
+      return typeof bs_normCaseId_ === 'function' ? bs_normCaseId_(rawCase) : normalizeCaseId_(rawCase);
     }
   }
   return null;
@@ -328,14 +315,34 @@ function lookupCaseIdByLineId_(lineId) {
 
 function sheetsRepo_hasSubmission_(caseId, formKey, submissionId) {
   if (!caseId || !formKey || !submissionId) return false;
-  const rows = sheetsRepo_readAll_(SHEETS_REPO_SUBMISSIONS, SHEETS_REPO_SUBMISSIONS_HEADERS);
-  return rows.some(function (row) {
-    return (
-      String(sheetsRepo_getValue_(row, 'case_id') || '').trim() === String(caseId).trim() &&
-      String(sheetsRepo_getValue_(row, 'form_key') || '').trim() === String(formKey).trim() &&
-      String(sheetsRepo_getValue_(row, 'submission_id') || '').trim() === String(submissionId).trim()
-    );
-  });
+  try {
+    const sheet = bs_getSheet_(SHEETS_REPO_SUBMISSIONS);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return false;
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+    const idx = (typeof bs_toIndexMap_ === 'function') ? bs_toIndexMap_(headers) : {};
+    const ci = idx['case_id'] != null ? idx['case_id'] : idx['caseId'];
+    const fi = idx['form_key'] != null ? idx['form_key'] : idx['formKey'];
+    const si = idx['submission_id'] != null ? idx['submission_id'] : idx['submissionId'];
+    if (!(ci >= 0 && fi >= 0 && si >= 0)) return false;
+    const rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    const wantCase = normalizeCaseId_(caseId);
+    const wantForm = String(formKey).trim();
+    const wantSub = String(submissionId).trim();
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (
+        normalizeCaseId_(row[ci] || '') === wantCase &&
+        String(row[fi] || '').trim() === wantForm &&
+        String(row[si] || '').trim() === wantSub
+      ) {
+        return true;
+      }
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
 }
 
 
