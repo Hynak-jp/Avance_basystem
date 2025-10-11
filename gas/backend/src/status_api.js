@@ -834,7 +834,7 @@ function statusApi_collectStaging_(lineId, caseId) {
               user_key: uk,
               line_id: lid,
               submitted_at: new Date().toISOString(),
-              status: 'intake',
+              status: 'received',
               seq: nextSeq3,
               referrer: nm,
               redirect_url: '',
