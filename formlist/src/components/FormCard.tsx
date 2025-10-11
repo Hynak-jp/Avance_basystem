@@ -41,16 +41,20 @@ export default function FormCard({
   // LIFFの仕様上、URLに改行やスペースが入るとエラーになるため、encodeURIComponentでエンコードする
   // redirectUrl は送信後に戻ってくるURL（ここでは完了ページに戻す）
   // formId も渡しておくと、完了ページでどのフォームが送信されたか分かる
+  const normalizeCaseId = (value: string | null | undefined) => {
+    if (!value) return '';
+    const digits = String(value).replace(/\D/g, '');
+    if (!digits) return '';
+    return digits.slice(-4).padStart(4, '0');
+  };
+  const normalizedCaseId = normalizeCaseId(caseId);
+  const isIntakeForm = (formKey || storeKey || progressKey) === 'intake';
   const fallback = disabled
     ? undefined
     : (() => {
         const url = new URL(baseUrl);
         const redirectUrl = new URL('https://formlist.vercel.app/done');
         redirectUrl.searchParams.set('formId', formId);
-        if (formKey) redirectUrl.searchParams.set('formKey', formKey);
-        const storeKeyParam = storeKey || formKey || formId;
-        if (storeKeyParam) redirectUrl.searchParams.set('storeKey', storeKeyParam);
-        if (caseId) redirectUrl.searchParams.set('caseId', caseId);
         url.searchParams.set('line_id[0]', lineId);
         url.searchParams.set('form_id', formId);
         url.searchParams.set('redirect_url[0]', redirectUrl.toString());
@@ -73,7 +77,10 @@ export default function FormCard({
   const serverCanEdit = serverStatus ? serverStatus.canEdit : undefined;
   const baseDisabled = disabled || !signedHref;
   const finalDisabled = serverCanEdit !== undefined ? !serverCanEdit || !signedHref : baseDisabled;
-  const isClickable = !!signedHref && !finalDisabled && !isDone;
+  const needsCaseId = !isIntakeForm;
+  const hasCaseId = Boolean(normalizedCaseId);
+  const caseGuardActive = needsCaseId && !hasCaseId;
+  const isClickable = !!signedHref && !finalDisabled && !isDone && !caseGuardActive;
   const isDisabled = !isClickable && !isDone;
 
   const containerClass = `rounded-lg border p-4 ${
@@ -98,6 +105,9 @@ export default function FormCard({
   }
 
   const disabledMsg = (() => {
+    if (caseGuardActive) {
+      return 'ケースIDの登録を待っています。受付処理が完了するまでお待ちください。';
+    }
     if (serverStatus && !serverStatus.canEdit && serverStatus.locked_reason) {
       return serverStatus.locked_reason;
     }
@@ -109,6 +119,29 @@ export default function FormCard({
       ? `事務所により再入力が許可されています（期限：${serverStatus.reopen_until}）`
       : '事務所により再入力が許可されています'
     : '';
+
+  const handleClick = () => {
+    if (typeof window === 'undefined') return;
+    if (caseGuardActive) {
+      window.alert('ケースIDが未連携のため、このフォームはまだ開けません。受付処理完了後に再度お試しください。');
+      return;
+    }
+    store.setStatus(progressKey, 'in_progress');
+    const canonicalKey = formKey || storeKey || progressKey;
+    const pending = {
+      formKey: canonicalKey,
+      storeKey: canonicalKey,
+      formId,
+      lineId,
+      caseId: normalizedCaseId,
+      savedAt: Date.now(),
+    };
+    try {
+      window.localStorage.setItem('formlist:pendingForm', JSON.stringify(pending));
+    } catch (e) {
+      console.error('store pendingForm failed', e);
+    }
+  };
 
   return (
     <div className={containerClass}>
@@ -140,7 +173,7 @@ export default function FormCard({
         <Link
           href={signedHref}
           prefetch={false}
-          onClick={() => store.setStatus(progressKey, 'in_progress')}
+          onClick={handleClick}
           className="inline-block px-3 py-2 rounded bg-black text-white"
         >
           開く
