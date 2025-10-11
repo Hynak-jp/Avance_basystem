@@ -60,9 +60,9 @@ function statusApi_formsFromSubmissions_(caseId) {
       var rowCase = statusApi_normCaseId_(row[ci]);
       if (!rowCase || rowCase !== want) continue;
       var rawFormKey = String(row[fi] || '').trim();
-      var canonicalKey = rawFormKey;
+      if (!rawFormKey) continue;
       var normalizedKey = rawFormKey.toLowerCase().replace(/[\s-]+/g, '_');
-      if (aliasMap[normalizedKey]) canonicalKey = aliasMap[normalizedKey];
+      var canonicalKey = aliasMap[normalizedKey] || normalizedKey;
       if (!canonicalKey) continue;
       var formKey = canonicalKey;
       var seq = seqIdx != null ? Number(row[seqIdx] || 0) || 0 : 0;
@@ -117,7 +117,8 @@ function statusApi_formsFromSubmissions_(caseId) {
       keys.forEach(function (key) {
         var item = map[key];
         if (!item) return;
-        if (!(item.last_seq > 0)) {
+        var status = String(item.status || '').trim().toLowerCase();
+        if (!(item.last_seq > 0) && (!status || status === 'received')) {
           try { item.last_seq = Number(getLastSeq_(item.case_id, key)) || 0; } catch (_) {}
         }
       });

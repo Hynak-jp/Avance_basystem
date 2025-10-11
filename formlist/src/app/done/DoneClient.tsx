@@ -11,7 +11,7 @@ export default function DoneClient({ lineId }: { lineId: string }) {
   const formKeyParam = search.get('formKey') || '';
   const storeKeyParam = search.get('storeKey') || '';
   const form = search.get('form') || '';
-  const storeKey = storeKeyParam || formKeyParam || formId || 'unknown';
+  const storeKey = storeKeyParam || formKeyParam || 'unknown';
   const pParam = search.get('p') || '';
   const tsParam = search.get('ts') || '';
   const sigParam = search.get('sig') || '';
@@ -63,39 +63,42 @@ export default function DoneClient({ lineId }: { lineId: string }) {
         }
       }
       // フォールバック：受付以外 or 失敗時も一覧へ戻す
-      if (storeKey && storeKey !== 'unknown') {
+      const ackFormKey = storeKey !== 'unknown' ? storeKey : formKeyParam;
+      if (ackFormKey && ackFormKey !== 'unknown' && pParam && tsParam && sigParam) {
         const ackParams = new URLSearchParams();
         ackParams.set('action', 'form_ack');
-        if (pParam) ackParams.set('p', pParam);
-        if (tsParam) ackParams.set('ts', tsParam);
-        if (sigParam) ackParams.set('sig', sigParam);
+        ackParams.set('formKey', ackFormKey);
+        ackParams.set('p', pParam);
+        ackParams.set('ts', tsParam);
+        ackParams.set('sig', sigParam);
         if (caseIdParam) ackParams.set('caseId', caseIdParam);
-        ackParams.set('formKey', storeKey);
-        ackParams.set('bust', '1');
         if (lineId) ackParams.set('lineId', lineId);
-        if (formId && !ackParams.has('formId')) ackParams.set('formId', formId);
         try {
           await fetch(`/api/status?${ackParams.toString()}`, { method: 'GET', cache: 'no-store' });
         } catch (e) {
           console.error('form_ack error', e);
         }
+      } else {
+        console.warn('form_ack skipped', { ackFormKey, hasSignature: Boolean(pParam && tsParam && sigParam) });
       }
 
-      const statusParams = new URLSearchParams();
-      statusParams.set('action', 'status');
-      statusParams.set('bust', '1');
-      if (pParam) statusParams.set('p', pParam);
-      if (tsParam) statusParams.set('ts', tsParam);
-      if (sigParam) statusParams.set('sig', sigParam);
-      if (caseIdParam) statusParams.set('caseId', caseIdParam);
-      statusParams.set('lineId', lineId);
-      try {
-        await fetch(`/api/status?${statusParams.toString()}`, {
-          method: 'GET',
-          headers: { 'x-line-id': lineId },
-          cache: 'no-store',
-        });
-      } catch {}
+      if (pParam && tsParam && sigParam) {
+        const statusParams = new URLSearchParams();
+        statusParams.set('action', 'status');
+        statusParams.set('bust', '1');
+        if (caseIdParam) statusParams.set('caseId', caseIdParam);
+        statusParams.set('p', pParam);
+        statusParams.set('ts', tsParam);
+        statusParams.set('sig', sigParam);
+        statusParams.set('lineId', lineId);
+        try {
+          await fetch(`/api/status?${statusParams.toString()}`, {
+            method: 'GET',
+            headers: { 'x-line-id': lineId },
+            cache: 'no-store',
+          });
+        } catch {}
+      }
       store.setStatus(storeKey, 'done');
       if (formId && formId !== storeKey) store.setStatus(formId, 'done');
       if (formKeyParam && formKeyParam !== storeKey) store.setStatus(formKeyParam, 'done');

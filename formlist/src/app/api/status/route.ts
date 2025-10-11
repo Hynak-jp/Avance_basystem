@@ -76,7 +76,10 @@ export async function GET(req: NextRequest) {
     };
 
     const hasSignedParams = searchParams.has('p') && searchParams.has('ts') && searchParams.has('sig');
-    if (passthroughAction === 'status' && hasSignedParams) {
+    if (passthroughAction === 'status') {
+      if (!hasSignedParams) {
+        return NextResponse.json({ ok: false, error: 'missing_signature' }, { status: 401 });
+      }
       const { params, error } = buildSanitizedParams();
       if (error) return error;
       return await forwardToGas(params!);
