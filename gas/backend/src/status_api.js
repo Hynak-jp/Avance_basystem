@@ -1297,12 +1297,7 @@ function doGet(e) {
             row.reopen_until_epoch !== undefined && row.reopen_until_epoch !== null && row.reopen_until_epoch !== ''
               ? Number(row.reopen_until_epoch)
               : null,
-          last_seq:
-            row.last_seq != null
-              ? Number(row.last_seq) || 0
-              : formKey && typeof getLastSeq_ === 'function'
-              ? getLastSeq_(caseId, formKey)
-              : 0,
+          last_seq: row.last_seq != null ? Number(row.last_seq) || 0 : 0,
         };
         if (snake.status && String(snake.status).toLowerCase() === 'received') snake.status = 'submitted';
         if (!snake.status) snake.status = '';
@@ -1316,8 +1311,8 @@ function doGet(e) {
       var resp = { ok: true, caseId: caseId, case_id: caseId, forms: forms };
       if (bustParam !== '1') {
         try { cache.put(cacheKey, JSON.stringify(resp), 10); } catch (_) {}
+        try { Logger.log('[status:cache] store caseId=%s', caseId); } catch (_) {}
       }
-      try { Logger.log('[status:cache] store caseId=%s', caseId); } catch (_) {}
       return statusApi_jsonOut_(resp, 200);
     }
 
@@ -1475,6 +1470,7 @@ function statusApi_handleIntakeAck_(params) {
 
   try {
     CacheService.getScriptCache().remove('status:' + normCaseId);
+    try { Logger.log('[status:cache] remove caseId=%s', normCaseId); } catch (_) {}
   } catch (_) {}
 
   try { Logger.log('[ack] type=intake case=%s submission=%s status=received seq=%s', normCaseId, submissionId, existingAck ? 'kept' : String(nextSeq)); } catch (_) {}
@@ -1588,6 +1584,7 @@ function statusApi_handleFormAck_(params) {
 
   try {
     CacheService.getScriptCache().remove('status:' + normCaseId);
+    try { Logger.log('[status:cache] remove caseId=%s', normCaseId); } catch (_) {}
   } catch (_) {}
 
   try { Logger.log('[ack] type=form case=%s form=%s submission=%s status=received seq=%s', normCaseId, formKey, submissionId, existingAck ? 'kept' : String(nextSeq)); } catch (_) {}
@@ -1846,6 +1843,7 @@ function recordSubmission_(payload) {
 
   try {
     CacheService.getScriptCache().remove('status:' + caseIdNorm);
+    try { Logger.log('[status:cache] remove caseId=%s', caseIdNorm); } catch (_) {}
   } catch (_) {}
 }
 

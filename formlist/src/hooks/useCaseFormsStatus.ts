@@ -36,9 +36,10 @@ export function useCaseFormsStatus(caseId?: string | null, lineId?: string | nul
     setState((prev) => ({ ...prev, isLoading: true, error: null }));
     try {
       const params = new URLSearchParams();
-      if (caseId) params.set('caseId', caseId);
       if (lineId) params.set('lineId', lineId);
-      const res = await fetch(`/api/bas-status?${params.toString()}`, { cache: 'no-store' });
+      if (caseId) params.set('caseId', caseId);
+      params.set('action', 'status');
+      const res = await fetch(`/api/status?${params.toString()}`, { method: 'GET', cache: 'no-store' });
       const json = (await res.json()) as CaseFormsStatusResponse;
       setState({ data: json, isLoading: false, error: null });
       return json;
