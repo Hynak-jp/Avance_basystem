@@ -129,6 +129,24 @@ function sheetsRepo_readAll_(sheetName, headers) {
   });
 }
 
+function sheetsRepo_buildIndexMap_(headers) {
+  const map = {};
+  (headers || []).forEach(function (header, idx) {
+    const aliases = sheetsRepo_aliases_(header || '');
+    aliases.forEach(function (alias) {
+      if (!alias) return;
+      if (!Object.prototype.hasOwnProperty.call(map, alias)) {
+        map[alias] = idx;
+      }
+    });
+  });
+  return map;
+}
+
+function sheetsRepo_getSubmissionsSheet_() {
+  return sheetsRepo_ensureSheet_(SHEETS_REPO_SUBMISSIONS, SHEETS_REPO_SUBMISSIONS_HEADERS);
+}
+
 function upsertCasesForms_(row) {
   try { Logger.log('upsertCasesForms_: skipped (cases_forms disabled) %s', JSON.stringify(row || {})); } catch (_) {}
   return null;
@@ -201,9 +219,12 @@ function insertSubmission_(row) {
     throw new Error('insertSubmission_: missing case_id or form_key');
   }
   const normalizedCaseId = normalizeCaseId_(caseIdRaw);
+  if (row && typeof normalizeCaseId_ === 'function') {
+    row.case_id = normalizeCaseId_(row.case_id || row.caseId || caseIdRaw);
+  }
   const userKeyRaw = sheetsRepo_getValue_(row, 'user_key');
   const normalizedUserKey = normalizeUserKey_(userKeyRaw);
-  const sheet = sheetsRepo_ensureSheet_(SHEETS_REPO_SUBMISSIONS, SHEETS_REPO_SUBMISSIONS_HEADERS);
+  const sheet = sheetsRepo_getSubmissionsSheet_();
   ensureSubmissionColumns_(sheet, SHEETS_REPO_SUBMISSIONS_HEADERS);
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
   const normalized = Object.assign({}, row, {
@@ -219,6 +240,9 @@ function insertSubmission_(row) {
     return value !== undefined && value !== null ? value : '';
   });
   sheet.appendRow(ordered);
+  if (typeof ensureSubmissionsCaseIdTextFormat_ === 'function') {
+    try { ensureSubmissionsCaseIdTextFormat_(); } catch (_) {}
+  }
 }
 
 /** (submission_id, form_key) で upsert し、任意の追加カラムも反映 */
@@ -230,9 +254,12 @@ function upsertSubmission_(row) {
     throw new Error('upsertSubmission_: missing case_id/form_key/submission_id');
   }
   const normalizedCaseId = normalizeCaseId_(caseIdRaw);
+  if (row && typeof normalizeCaseId_ === 'function') {
+    row.case_id = normalizeCaseId_(row.case_id || row.caseId || caseIdRaw);
+  }
   const userKeyRaw = sheetsRepo_getValue_(row, 'user_key');
   const normalizedUserKey = normalizeUserKey_(userKeyRaw);
-  const sheet = sheetsRepo_ensureSheet_(SHEETS_REPO_SUBMISSIONS, SHEETS_REPO_SUBMISSIONS_HEADERS);
+  const sheet = sheetsRepo_getSubmissionsSheet_();
   // 足りない列を保証（列ズレ防止）
   ensureSubmissionColumns_(sheet, SHEETS_REPO_SUBMISSIONS_HEADERS);
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(function(v){return String(v||'').trim();});
@@ -275,6 +302,9 @@ function upsertSubmission_(row) {
     });
     sheet.appendRow(ordered);
   }
+  if (typeof ensureSubmissionsCaseIdTextFormat_ === 'function') {
+    try { ensureSubmissionsCaseIdTextFormat_(); } catch (_) {}
+  }
 }
 
 function ensureSubmissionColumns_(sheet, needed) {
@@ -287,6 +317,54 @@ function ensureSubmissionColumns_(sheet, needed) {
     const merged = header.concat(add);
     sheet.getRange(1, 1, 1, merged.length).setValues([merged]);
   }
+}
+
+function sheetsRepo_deleteAckRow_(caseId, formKey) {
+  try {
+    var normalizedCaseId = normalizeCaseId_(caseId || '');
+    if (!normalizedCaseId || !formKey) return false;
+    var sheet = sheetsRepo_getSubmissionsSheet_();
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return false;
+    var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+    var idx = (typeof bs_toIndexMap_ === 'function') ? bs_toIndexMap_(headers) : sheetsRepo_buildIndexMap_(headers);
+    var sidIdx = idx['submission_id'] != null ? idx['submission_id'] : idx['submissionId'];
+    if (!(sidIdx >= 0)) return false;
+    var rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    var target = 'ack:' + normalizedCaseId + ':' + String(formKey || '').trim();
+    for (var r = rows.length - 1; r >= 0; r--) {
+      var sid = String(rows[r][sidIdx] || '').trim();
+      if (!sid) continue;
+      if (sid.toLowerCase() === target.toLowerCase()) {
+        sheet.deleteRow(r + 2);
+        return true;
+      }
+    }
+  } catch (_) {}
+  return false;
+}
+
+function sheetsRepo_sweepSubmissions_() {
+  try {
+    var sheet = sheetsRepo_getSubmissionsSheet_();
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return 0;
+    var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+    var idx = (typeof bs_toIndexMap_ === 'function') ? bs_toIndexMap_(headers) : sheetsRepo_buildIndexMap_(headers);
+    var sidIdx = idx['submission_id'] != null ? idx['submission_id'] : idx['submissionId'];
+    if (!(sidIdx >= 0)) return 0;
+    var removed = 0;
+    var rows = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+    for (var r = rows.length - 1; r >= 0; r--) {
+      var sid = String(rows[r][sidIdx] || '').trim();
+      if (!/^(ack:[\w:-]+|\d+)$/.test(sid)) {
+        sheet.deleteRow(r + 2);
+        removed++;
+      }
+    }
+    return removed;
+  } catch (_) {}
+  return 0;
 }
 
 function lookupCaseIdByLineId_(lineId) {

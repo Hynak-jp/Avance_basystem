@@ -13,11 +13,13 @@
 ## 1. 不変条件（Invariants）
 1. **ケースフォルダは intake 完了時のみ作成**する。`bootstrap` / `status` 経路では新規作成しない。
 2. **case_id は常に文字列**で保持・表示する（シートは列単位で `@` 書式固定）。
-3. **submissions への追記は1回のみ**。`submission_id + form_key` で重複を抑止する。
-4. **staging → 案件移送の一致判定は** `case_key` > `case_id` > `line_id` の優先順。
-5. **救済の限定 ensure**（status 経路）は「本人の intake が実在」する場合のみ許可する。
-6. 署名は **V2（HMAC）を優先**し、**±600秒**の時刻スキュー検証を通過したもののみ処理する。V1はフェイルセーフとして継続。
-7. 並行実行を避けるため、**ScriptLock(〜10秒)** ＋（必要に応じて）短命キャッシュを用いる。
+3. **submissions への追記は1回のみ**。`submission_id + form_key` で重複を抑止する（`submission_id` は半角数字のみ）。
+4. **submission_id は常に半角数字**（META 等に不正値が来た場合は `submitted_at` から `yyyyMMddHHmmss` を復元し、それも不可なら現在時刻で再採番）。ACK 行（`ack:...`）は本体着信時に自動削除する。
+5. **staging → 案件移送の一致判定は** `case_key` > `case_id` > `line_id` の優先順。
+6. **救済の限定 ensure**（status 経路）は「本人の intake が実在」する場合のみ許可する。
+7. 署名は **V2（HMAC）を優先**し、**±600秒**の時刻スキュー検証を通過したもののみ処理する。V1はフェイルセーフとして継続。
+8. 並行実行を避けるため、**ScriptLock(〜10秒)** ＋（必要に応じて）短命キャッシュを用いる。
+9. **通知メール（フォーム取込）は NOTIFY_SECRET を検証**し、ScriptLock 内で `case_key` 解決 → JSON 保存（同一ファイルは上書き）の流れを踏む。
 
 ---
 
@@ -83,7 +85,7 @@ function matchesTarget(json, { ukey, cid, ckey, lid }) {
 1. **既存フォルダ解決**（作成しない）。intake 完了直後は **knownFolderId** を使用。
 2. staging を列挙し、`intake__*.json` を対象に **4.1 の優先順位**で一致判定。
 3. 一致したファイルを**案件フォルダへ移送**（作成済フォルダのみ）。
-4. `submission_id` は **ファイル名 → JSON → Date.now()** の順で補完。
+4. `submission_id` は **ファイル名 → JSON → Date.now()** の順で補完し、最終的に半角数字へ正規化（不正フォーマットはその場で再採番）。
 5. `submissions` に **列名マッピング＋重複ガード**で1行追記。`cases_forms` を `intake: received` に upsert（任意）。
 6. **計測ログ**: `moved`, `appended` 件数を出す。
 
@@ -96,7 +98,7 @@ function matchesTarget(json, { ukey, cid, ckey, lid }) {
 
 ## 5. スプレッドシート・スキーマ/書式
 - `contacts.active_case_id` / `cases.case_id` / `submissions.case_id` は **列単位で `@` 書式**に固定。
-- `submissions` 必須列: `submission_id`, `form_key`, `case_id`（不足時は **append をスキップ**しログを出す）。
+- `submissions` 必須列: `submission_id`, `form_key`, `case_id`（不足時は **append をスキップ**しログを出す）。`submission_id` は保存時に半角数字へ正規化され、Gmail 取込ログシート（submission_logs）とは区別して管理する。ACK 用の `ack:<caseId>:<formKey>` 行は本体行が入ったタイミングで自動削除し、スイープユーティリティでも残す。
 - 旧API（配列 index で `setValues`）は廃止。**列名ベース**関数 `submissions_appendRow` のみ使用。
 
 ---
@@ -106,6 +108,7 @@ function matchesTarget(json, { ukey, cid, ckey, lid }) {
   - **±600秒**の時刻スキュー検証を実施（UNIX秒 vs ミリ秒混在に注意）。
 - **V1署名**: 互換運用。tsは**ミリ秒へ変換して比較**。
 - 秘密鍵は `HMAC_SECRET` を**末尾空白/改行除去**して使用。
+- **通知メール（FormMailer）**: META の `secret` と Script Properties `NOTIFY_SECRET`（未設定時は `FM-BAS`）を小文字化＆トリム後に厳密比較。
 
 ---
 
@@ -133,5 +136,5 @@ function matchesTarget(json, { ukey, cid, ckey, lid }) {
 - `submissions` に **1 行のみ**（`form_key=intake`, `case_id="0001"`, `referrer`=ファイル名, `status=received`）。
 - **meta が line_id を持たない/ case_id を持つ**JSONでも移送できる（`case_key/ case_id` 優先が効く）。
 - 署名 ts スキュー境界（±600秒）で許可/拒否の切り替えを確認。
+- submissions シートに非数値の `submission_id` 行が残らない（`sheetsRepo_sweepSubmissions_` で掃除可能）。
 - `getCaseForms_` 未ロードでも `forms: []` で返る。
-

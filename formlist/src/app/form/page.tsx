@@ -51,6 +51,14 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
       storeKey: 's2005_creditors',
     },
     {
+      formId: '314004',
+      title: 'S2006 債権者一覧表（公租公課用）',
+      description: '債権者情報（公租公課用）を記入します',
+      baseUrl: 'https://business.form-mailer.jp/lp/4b27d644314004',
+      formKey: 's2006_creditors_public',
+      storeKey: 's2006_creditors_public',
+    },
+    {
       formId: '309542',
       title: 'S2010 陳述書提出フォーム(1/3)',
       description: '経歴等を記入します',

@@ -1339,6 +1339,7 @@ function statusApi_handleIntakeAck_(params) {
   var v2 = statusApi_verifyV2_(p);
   var lineId = String(p.lineId || p.line_id || '').trim();
   var caseIdHint = String(p.caseId || p.case_id || '').trim();
+  var paramCaseIdNorm = statusApi_normCaseId_(String(p.caseId || p.case_id || ''));
   var tsRaw = String(p.ts || '').trim();
   var sig = String(p.sig || '').trim();
 
@@ -1372,6 +1373,7 @@ function statusApi_handleIntakeAck_(params) {
   }
 
   var caseId = caseIdHint;
+  if (!caseId && paramCaseIdNorm) caseId = paramCaseIdNorm;
   if (!caseId) caseId = lookupCaseIdByLineId_(lineId);
   if (!caseId) {
     return statusApi_jsonOut_({ ok: false, error: 'case_not_found' }, 404);
@@ -1512,6 +1514,8 @@ function statusApi_handleFormAck_(params) {
   }
 
   var caseId = caseIdHint;
+  var paramCaseIdNorm = statusApi_normCaseId_(String(p.caseId || p.case_id || ''));
+  if (!caseId && paramCaseIdNorm) caseId = paramCaseIdNorm;
   if (!caseId) caseId = lookupCaseIdByLineId_(lineId);
   if (!caseId) return statusApi_jsonOut_({ ok: false, error: 'case_not_found' }, 404);
   var normCaseId = statusApi_normCaseId_(caseId);
@@ -1716,14 +1720,14 @@ function recordSubmission_(payload) {
   const caseIdRaw = payload.case_id || payload.caseId;
   const formKeyRaw = payload.form_key;
   if (!caseIdRaw || !formKeyRaw) return;
-  const caseId = statusApi_normCaseId_(caseIdRaw);
+  const caseIdNorm = statusApi_normCaseId_(caseIdRaw);
   const formKey = String(formKeyRaw).trim();
-  if (!caseId || !formKey) return;
+  if (!caseIdNorm || !formKey) return;
 
   const submissionId = String(payload.submission_id || '').trim();
   const fallbackInfo = {
     caseKey: payload.case_key || payload.caseKey,
-    caseId: caseId,
+    caseId: caseIdNorm,
     userKey: payload.user_key || payload.userKey,
     lineId: payload.line_id || payload.lineId,
   };
@@ -1737,28 +1741,28 @@ function recordSubmission_(payload) {
     if (!metaLineId && payload.meta && payload.meta.lineId) metaLineId = payload.meta.lineId;
     const row =
       typeof drive_lookupCaseRow_ === 'function'
-        ? drive_lookupCaseRow_({ caseId: caseId, lineId: metaLineId })
+        ? drive_lookupCaseRow_({ caseId: caseIdNorm, lineId: metaLineId })
         : null;
     if (row && row.userKey) {
       fallbackInfo.userKey = row.userKey;
-      caseKey = row.userKey + '-' + caseId;
+      caseKey = row.userKey + '-' + caseIdNorm;
     }
   }
   if (!caseKey && fallbackInfo.userKey) {
-    caseKey = fallbackInfo.userKey + '-' + caseId;
+    caseKey = fallbackInfo.userKey + '-' + caseIdNorm;
   }
   if (!caseKey && fallbackInfo.lineId) {
     const inferredKey =
       typeof drive_userKeyFromLineId_ === 'function'
         ? drive_userKeyFromLineId_(fallbackInfo.lineId)
         : '';
-    if (inferredKey) caseKey = inferredKey + '-' + caseId;
+    if (inferredKey) caseKey = inferredKey + '-' + caseIdNorm;
   }
 
   if (caseKey && caseKey.indexOf('-') >= 0) {
     const parts = caseKey.split('-');
     const head = parts[0] || '';
-    caseKey = head + '-' + caseId;
+    caseKey = head + '-' + caseIdNorm;
   }
 
   var normalizedUserKey = normalizeUserKey_(payload.user_key || payload.userKey || '');
@@ -1775,27 +1779,27 @@ function recordSubmission_(payload) {
     ukCandidate = userKeyFromKey || fallbackInfo.userKey || '';
     if (!ukCandidate && fallbackInfo.lineId) ukCandidate = drive_userKeyFromLineId_(fallbackInfo.lineId);
     if (ukCandidate && typeof bs_resolveCaseFolderId_ === 'function') {
-      caseFolderId = bs_resolveCaseFolderId_(ukCandidate, caseId, fallbackInfo.lineId || '');
+      caseFolderId = bs_resolveCaseFolderId_(ukCandidate, caseIdNorm, fallbackInfo.lineId || '');
     }
     if (!caseFolderId && typeof resolveCaseFolderId_ === 'function') {
-      caseFolderId = resolveCaseFolderId_(fallbackInfo.lineId || '', caseId, /*createIfMissing=*/false);
+      caseFolderId = resolveCaseFolderId_(fallbackInfo.lineId || '', caseIdNorm, /*createIfMissing=*/false);
     }
   } catch (_) {}
   if (caseFolderId && typeof updateCasesRow_ === 'function') {
     try {
       const patch = { case_key: caseKey || '', folder_id: caseFolderId };
-      if (!patch.case_key && caseFolderId && ukCandidate) patch.case_key = ukCandidate + '-' + caseId;
+      if (!patch.case_key && caseFolderId && ukCandidate) patch.case_key = ukCandidate + '-' + caseIdNorm;
       if (!fallbackInfo.userKey && patch.case_key.indexOf('-') >= 0) {
         patch.user_key = patch.case_key.split('-')[0];
       }
-      updateCasesRow_(caseId, patch);
+      updateCasesRow_(caseIdNorm, patch);
     } catch (_) {}
   }
   try {
     if (
       submissionId &&
       typeof sheetsRepo_hasSubmission_ === 'function' &&
-      sheetsRepo_hasSubmission_(caseId, formKey, submissionId)
+      sheetsRepo_hasSubmission_(caseIdNorm, formKey, submissionId)
     ) {
       return;
     }
@@ -1804,7 +1808,6 @@ function recordSubmission_(payload) {
   }
 
   let last = 0;
-  const caseIdNorm = statusApi_normCaseId_(caseId);
   try {
     if (typeof getLastSeq_ === 'function') last = Number(getLastSeq_(caseIdNorm, formKey)) || 0;
   } catch (err) {
@@ -1845,6 +1848,13 @@ function recordSubmission_(payload) {
     CacheService.getScriptCache().remove('status:' + caseIdNorm);
     try { Logger.log('[status:cache] remove caseId=%s', caseIdNorm); } catch (_) {}
   } catch (_) {}
+
+  if (submissionId && !/^ack:/i.test(submissionId) && typeof sheetsRepo_deleteAckRow_ === 'function') {
+    try { sheetsRepo_deleteAckRow_(caseIdNorm, formKey); } catch (_) {}
+  }
+  if (typeof sheetsRepo_sweepSubmissions_ === 'function') {
+    try { sheetsRepo_sweepSubmissions_(); } catch (_) {}
+  }
 }
 
 /** POST /exec でのルーティング */

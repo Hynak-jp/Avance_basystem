@@ -726,7 +726,29 @@ function saveSubmissionJson_(caseFolderId, parsed) {
       ? String(parsed.meta.submission_id)
       : String(Date.now());
   const fname = `${parsed.meta.form_key}__${sid}.json`;
-  const blob = Utilities.newBlob(JSON.stringify(parsed, null, 2), 'application/json', fname);
+  const content = JSON.stringify(parsed, null, 2);
+  let existing = null;
+  const dupIt = parent.getFilesByName(fname);
+  while (dupIt.hasNext()) {
+    const candidate = dupIt.next();
+    if (!existing) {
+      try {
+        candidate.setContent(content);
+      } catch (_) {
+        try {
+          candidate.setTrashed(true);
+          continue;
+        } catch (_) {}
+      }
+      existing = candidate;
+    } else {
+      try {
+        candidate.setTrashed(true);
+      } catch (_) {}
+    }
+  }
+  if (existing) return existing;
+  const blob = Utilities.newBlob(content, 'application/json', fname);
   return parent.createFile(blob); // 仕様: ケース直下に保存
 }
 
@@ -852,41 +874,6 @@ function findBestCaseFolderUnderRoot_(name, preferId) {
     if (cur && cur.score >= candidates[0].score) return cur;
   }
   return candidates[0];
-}
-
-/**
- * フォルダの「それらしさ」を採点。
- * s2002_userform__*.json: +5（≥1件で加点）
- * 任意の直下 .json: +2（≥1件で加点）
- * drafts/ サブフォルダ: +3
- * attachments/ or staff_inputs/ サブフォルダ: +1 ずつ
- */
-function scoreCaseFolder_(folder) {
-  let s2 = 0;
-  let anyJson = 0;
-  const itF = folder.getFiles();
-  let scanned = 0;
-  while (itF.hasNext() && scanned < 500) {
-    const f = itF.next();
-    scanned++;
-    const n = f.getName && f.getName();
-    if (!n) continue;
-    if (/\.json$/i.test(n)) anyJson = 1;
-    if (/^s2002_userform__/i.test(String(n).trim())) s2 = 1;
-  }
-  let drafts = 0,
-    attach = 0,
-    staff = 0;
-  const itD = folder.getFolders();
-  while (itD.hasNext()) {
-    const d = itD.next();
-    const dn = d.getName && d.getName();
-    if (dn === 'drafts') drafts = 1;
-    if (dn === 'attachments') attach = 1;
-    if (dn === 'staff_inputs') staff = 1;
-  }
-  const score = s2 * 5 + anyJson * 2 + drafts * 3 + attach * 1 + staff * 1;
-  return { score, s2, anyJson, drafts, attach, staff };
 }
 
 /** ====== S2002 ドラフト生成（gdoc） ====== **/

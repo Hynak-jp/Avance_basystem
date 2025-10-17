@@ -8,7 +8,7 @@ Codex へのお願い（常設メモ）：
 - セクション構成は維持し、差分が分かるように箇条書き・ツリーと要点説明を併記してください。
 -->
 
-最終更新: 2025-09-09（S2002 intake/draft, 5分トリガ, submissions 反映）
+最終更新: 2025-10-17（フォーム取込パイプライン共通化・S2006 対応）
 
 このドキュメントは、実際のディレクトリ/ファイル構成と主要コードの役割を反映します。
 主なモジュールは **formlist（Next.js）** と **gas（Apps Script）** です。進捗・方針は `docs/PROJECT_STATUS.md` を参照。
@@ -120,10 +120,15 @@ gas/backend/src/
   - 添付はカテゴリ直下へ `YYYYMM_TYPE[_n].ext` 命名で保存
   - 画像直リンク化 →Next `/api/extract` へ POST（CORS, 秘密鍵ヘッダ対応）
 - `仕上げ用パッチ.js`：`_model.json` をもとに Google Doc 作成 →DOCX エクスポート → 台帳追記
-- `s2002_draft.js`：S2002 Intake の通知メール取り込み → ケース直下に JSON 保存 → GDoc テンプレ差し込みでドラフト生成（`drafts/` に保存）
+- `forms_ingest_core.js`：フォーム通知共通パイプライン。`parseFormMail_` → `ensureSubmissionIdDigits_` → `resolveCaseByCaseId_` → `ensureCaseFolderId_` → `saveSubmissionJson_` を統合し、`NOTIFY_SECRET` 検証と ScriptLock による競合回避、既存 JSON の上書き保存を提供。
+- `form_mapper_s2006.js`：S2006（公租公課）専用マッパーとデバッグエントリ。車両番号正規化・`registerFormMapper` での登録・共通パイプライン呼び出しを担当。
+- `s2002_draft.js`：S2002 Intake の通知メール取り込み → ケース直下に JSON 保存 → GDoc テンプレ差し込みでドラフト生成（`drafts/` に保存）。`saveSubmissionJson_` は同名 JSON の上書き・重複トラッシュに対応。
 - `トリガー（５分おき）.js`：`cron_1min`（既存）と `run_ProcessInbox_S2002` を5分間隔で実行・健全化
 - `_model.json が無ければ作ってから finalize まで自動実行.js`：抽出 → モデル化 → 仕上げを一括実行
 - `appsscript.json`：スコープ/高度なサービス（Drive, Vision）設定
+
+> Script Properties（抜粋）  
+> `NOTIFY_SECRET`（通知検証用シークレット。未設定時は `FM-BAS` を利用）/ `BAS_MASTER_SPREADSHEET_ID` / `ROOT_FOLDER_ID` / `DRIVE_ROOT_FOLDER_ID` など。
 
 gas/hello-world/src/
 
@@ -139,13 +144,14 @@ gas/hello-world/src/
 ### 3.3 スプレッドシート（台帳）
 
 - `contacts`：`userKey, lineId, displayName, email, activeCaseId, updatedAt, intakeAt`（運用列。旧列は整理）
-- `submissions`：`ts_saved, line_id, form_name, submission_id, seq, saved_file_ids, json_id`（運用中）
+- `submissions`：`case_id, case_key, form_key, seq, submission_id, received_at, supersedes_seq, json_path, ...`（status_api / sheets_repo 管理）
+- `submission_logs`：Gmail 取込用の簡易ログ（`ts_saved, line_id, form_name, submission_id, ...`）。`submission_id` は半角数字に自動正規化される
 - `form_logs`：フォーム原本のログ保管（任意）
 - `cases`：`caseId, userKey, lineId, status, folderId, createdAt`（bootstrap で初期行追加）
 
 ### 3.4 命名・保存ルール（運用）
 
-- JSON：`<formkey>__<submissionId>.json`（ユーザーフォルダ直下 or staging, `meta.case_id` を格納）
+- JSON：`<formkey>__<submissionId>.json`（ユーザーフォルダ直下 or staging。`meta.case_id` / `meta.case_key` を必ず格納し、`submissionId` は数字のみのユニークIDに正規化。`submitted_at` から復元できない場合は 14 桁タイムスタンプでフォールバックし、仮ACK（`ack:...`）行は本体行到着時に自動削除）
 - 添付：`YYYYMM_TYPE[_n].ext`（カテゴリ直下。例：`202509_PAY.png`）
 - 画像直リンク：`https://drive.usercontent.google.com/u/0/uc?id=<ID>&export=download`
 - S2002 ドラフト：`drafts/S2002_<caseId>_draft_<submission_id>`（Googleドキュメント）
@@ -171,7 +177,7 @@ gas/hello-world/src/
 
 - **userKey**：`lineId` 先頭 6 文字を想定（将来運用）。
 - **caseId**：ユーザー単位 4 桁連番（運用中）。
-- **form JSON**：`<formkey>__<submissionId>.json`
+- **form JSON**：`<formkey>__<submissionId>.json`（`submissionId` は半角数字。META が不正値の場合は `submitted_at` →14桁タイムスタンプで再採番し、`meta.case_id` / `meta.case_key` を保存）
 - **attachments**：`YYYYMM_TYPE[_n].ext`（例：`202509_PAY.png`）
 - **drafts**：`S2002_<caseId>.docx` など（テンプレ運用開始後）
   - 現況は GDoc ドラフト（`S2002_<caseId>_draft_<submission_id>`）。docx エクスポートは今後対応。
@@ -205,9 +211,10 @@ gas/hello-world/src/
 > **Codex メモ**：タスクを進めたら、ここに日付入りで完了印を付けてください（例：`[x] 2025-09-05 完了`）。
 
 ---
-
 ## 9. 変更履歴
 
+- 2025-10-17: フォーム取込パイプライン（`forms_ingest_core.js`）追加、S2006 マッパー分離、JSON 保存仕様更新
 - 2025-09-09: S2002 intake/draft と 5 分トリガ、submissions 列定義を反映
+- 2025-09-12: submission_id の数値化・ACK 行クリーンアップ、staging intake の仕様更新を反映
 - 2025-09-05: caseId ブートストラップ / 署名付きフォームURL / GAS doPost を反映
 - 2025-09-04: 現状コードに同期（formlist/API 実体・GAS 構成・シート定義の整合、未実装箇所明示）

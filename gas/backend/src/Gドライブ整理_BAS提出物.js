@@ -169,7 +169,7 @@ const OCR_TARGET_FORMS = []; // []テスト用に空です。運用時はフォ�
 const OCR_LANG_HINTS = ['ja', 'en']; // 日本語＋英語
 const OCR_PROCESSED_PROP = 'ocr_processed'; // Driveファイルのプロパティ名
 
-/** ===== JSON保存: submission_logsフォルダ廃止版 ===== */
+/** ===== JSON保存: Google Drive (案件 or staging) ===== */
 /** METAブロック抽出（==== META START ==== ... ==== META END ====） */
 function parseMetaBlock_(text) {
   if (!text) return {};
@@ -223,7 +223,7 @@ function resolveFormKeyFinal_(mailPlainBody, fields, subject) {
   return normalizeKey_(k || 'unknown');
 }
 
-/** ユーザーフォルダ直下に JSON 保存（submission_logs は使わない） */
+/** ユーザーフォルダ直下に JSON 保存（submission_logs シートはログ専用） */
 function saveSubmissionJsonShallow_(
   userFolder,
   submissionId,
@@ -379,6 +379,19 @@ function sanitize(s) {
     .replace(/[\\/:*?"<>|]/g, '_')
     .trim();
 }
+
+function normalizeSubmissionIdStrict_(s) {
+  s = String(s || '')
+    .trim()
+    .replace(/[！-～]/g, function (ch) {
+      return String.fromCharCode(ch.charCodeAt(0) - 0xfee0);
+    })
+    .replace(/[\u200B-\u200D\uFEFF]/g, '');
+  if (!s) return '';
+  if (/^\d{3,}$/.test(s)) return s;
+  return '';
+}
+
 function getOrCreateFolder(parent, name) {
   const nm = sanitize(name || 'unknown');
   const it = parent.getFoldersByName(nm);
@@ -927,7 +940,8 @@ function parseMetaAndFields(msg) {
 
   const line_id = sanitize(meta.line_id || subjectLine || '');
   const form_name = sanitize(meta.form_name || '');
-  const submission_id = sanitize(meta.submission_id || subjectSid || '');
+  const submission_id_raw = meta.submission_id || subjectSid || '';
+  const submission_id = normalizeSubmissionIdStrict_(submission_id_raw);
   const submitted_at = meta.submitted_at || '';
   const seq = meta.seq || '';
   const referrer = meta.referrer || '';
@@ -1036,7 +1050,19 @@ function checkNotificationGuard_(msg, meta) {
 function saveAttachmentsAndJson(meta, msg) {
   const when = msg.getDate();
   const submitYm = Utilities.formatDate(when, ASIA_TOKYO, 'yyyy-MM'); // 提出月（送信日時）
-  const submissionId = meta.submission_id || 'SUB' + tsKey(when).replace(/[^0-9]/g, '');
+  const normalizedSubmissionId = normalizeSubmissionIdStrict_(meta.submission_id);
+  let submissionId = normalizedSubmissionId;
+  if (!submissionId) {
+    submissionId = String(Date.now());
+    try {
+      Logger.log(
+        '[email-intake] sid_fallback from "%s" -> "%s"',
+        meta.submission_id || '',
+        submissionId
+      );
+    } catch (_) {}
+  }
+  meta.submission_id = submissionId;
   const display = pickDisplayName(meta.fields);
   const body = meta.body || msg.getPlainBody() || msg.getBody() || '';
 
@@ -1216,7 +1242,7 @@ function updateLedgers(meta, saved) {
   const ss = openOrCreateMaster_();
 
   // submissions
-  const shSub = getOrCreateSheet(ss, 'submissions', [
+  const shSub = getOrCreateSheet(ss, 'submission_logs', [
     'ts_saved',
     'line_id',
     'form_name',
@@ -1229,7 +1255,7 @@ function updateLedgers(meta, saved) {
     fmt(new Date()),
     meta.line_id,
     meta.form_name,
-    meta.submission_id,
+    normalizeSubmissionIdStrict_(meta.submission_id) || String(Date.now()),
     meta.seq,
     (saved.savedFiles || []).map((s) => s.id).join(','),
     saved.jsonId,
@@ -2029,29 +2055,34 @@ function appendSubmissionLog_({
   content_hash,
 }) {
   const ss = openOrCreateMaster_();
-  const sh = ss.getSheetByName('submissions');
-  if (sh.getLastRow() === 0) {
-    sh.appendRow([
-      'ts_saved',
-      'line_id',
-      'email',
-      'submission_id',
-      'form_name',
-      'submit_ym',
-      'doc_code',
-      'period_yyyymm',
-      'drive_file_id',
-      'file_name',
-      'folder_path',
-      'content_hash',
-    ]);
-  }
+  const sh = getOrCreateSheet(ss, 'submission_logs', [
+    'ts_saved',
+    'line_id',
+    'email',
+    'submission_id',
+    'form_name',
+    'submit_ym',
+    'doc_code',
+    'period_yyyymm',
+    'drive_file_id',
+    'file_name',
+    'folder_path',
+    'content_hash',
+  ]);
   const now = Utilities.formatDate(new Date(), ASIA_TOKYO, 'yyyy-MM-dd HH:mm:ss');
+  const normalizedSid = normalizeSubmissionIdStrict_(submission_id);
+  let sid = normalizedSid;
+  if (!sid) {
+    sid = String(Date.now());
+    try {
+      Logger.log('[email-intake] sid_fallback(log) from "%s" -> "%s"', submission_id || '', sid);
+    } catch (_) {}
+  }
   sh.appendRow([
     now,
     line_id || '',
     normalizeEmail_(email || ''),
-    submission_id || '',
+    sid,
     form_name || '',
     submit_ym || '',
     doc_code || '',
@@ -2061,6 +2092,33 @@ function appendSubmissionLog_({
     folder_path || '',
     content_hash || '',
   ]);
+}
+
+function sweepInvalidSubmissionRows_() {
+  const ss = openOrCreateMaster_();
+  const sh = ss.getSheetByName('submission_logs');
+  if (!sh) return;
+  const range = sh.getDataRange();
+  const values = range.getValues();
+  if (values.length <= 1) return;
+  const header = values[0];
+  const indexMap = header.reduce(function (acc, key, idx) {
+    acc[String(key)] = idx;
+    return acc;
+  }, {});
+  const sidIdx =
+    indexMap.submission_id != null
+      ? indexMap.submission_id
+      : indexMap.submissionId != null
+      ? indexMap.submissionId
+      : null;
+  if (sidIdx == null) return;
+  for (let r = values.length - 1; r >= 1; r--) {
+    const sid = String(values[r][sidIdx] || '').trim();
+    if (!/^(ack:[\w:-]+|\d{3,})$/.test(sid)) {
+      sh.deleteRow(r + 1);
+    }
+  }
 }
 
 /** 指定フォルダ以下のツリーをログに出力 */

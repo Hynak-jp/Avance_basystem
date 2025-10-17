@@ -52,7 +52,7 @@ BAS の実運用キーは次の3つです。役割がぶれないように使い
 
 ### 保存ルール
 
-- JSON: `<formKey>__<submissionId>.json`（`meta.case_id` に格納）
+- JSON: `<formKey>__<submissionId>.json`（`meta.case_id` / `meta.case_key` を格納。submissionId は半角数字に正規化し、META が不正値のときは `submitted_at` →14桁タイムスタンプで再採番）
 - スタッフ入力: `staff_<caseId>_vN.json`
 - 生成物: `S2002_<caseId>.docx`, `S2011_<caseId>.xls` など
 
@@ -79,7 +79,7 @@ BAS の実運用キーは次の3つです。役割がぶれないように使い
 - **cases**
   - `lineId, caseId, createdAt, status, lastActivity`
 - **submissions（任意）**
-  - `lineId, formKey, submissionId, fileId, caseId, createdAt`
+  - `lineId, formKey, submissionId, fileId, caseId, createdAt`（submissionId は半角数字に正規化）
 
 ---
 
@@ -115,7 +115,7 @@ BAS_提出書類（ROOT_FOLDER_ID/DRIVE_ROOT_FOLDER_ID: 15QnwkhoXUkh8gVg56R3cSX-
 - **userKey**：`lineId` 先頭 6 文字を小文字化（例: `uc13df`）
 - **caseId**：ユーザー単位の 4 桁連番（例: `0001`）
 - **caseKey**：`userKey-caseId`（例: `uc13df-0001`） ← フォルダ名に使用
-- **JSON**：`<formKey>__<submissionId>.json`（`meta.case_id` にも保存）
+- **JSON**：`<formKey>__<submissionId>.json`（`meta.case_id` / `meta.case_key` を保存）
 - **添付**：`attachments/<日本語カテゴリ>/YYYYMM_TYPE[_n].ext`（例: `attachments/給与明細/202509_PAY.png`）
 - **生成物**：`S20xx_<caseId>.<ext>`（例: `S2002_0001.docx`）
   - S2002（現況）: `drafts/S2002_<caseId>_draft_<submission_id>`（GDoc）。docx は今後対応。
@@ -127,15 +127,14 @@ BAS_提出書類（ROOT_FOLDER_ID/DRIVE_ROOT_FOLDER_ID: 15QnwkhoXUkh8gVg56R3cSX-
 
 - 安全ガード（すべてのフォーム共通）
 
-  - 件名に `[#FM-BAS]`、META ブロックに `secret: FM-BAS` を両方含むことを必須とする（`REQUIRE_SECRET=true`）。
+  - 件名に `[#FM-BAS]` を含め、META ブロックの `secret` と Script Properties `NOTIFY_SECRET`（未設定時は `FM-BAS`）を突き合わせて検証。
   - 判定は正規化して比較（全角 → 半角、各種ハイフン統一、ゼロ幅スペース除去、空白除去・小文字化）。
-  - Script Properties: `NOTIFY_SECRET`（未設定時は `FM-BAS`）。
 
 - 保存先の決定（添付ファイル・JSON）
 
   - LINE ID と `caseId` が判明している場合:
     - 添付: `<caseKey>/attachments/<日本語カテゴリ>/...`
-    - JSON: `<caseKey>/<formKey>__<submissionId>.json`
+  - JSON: `<caseKey>/<formKey>__<submissionId>.json`（submissionId は半角数字）
   - いずれか不明（メールのみ等）の場合:
     - `_email_staging/<YYYY-MM>/<email_hash>/` または `/_staging/<YYYY-MM>/submission_<SID>/` に一時保存
   - 後から LINE+caseId が分かった時点で、`_email_staging` から案件フォルダの `attachments/` 配下へ統合（重複は content_hash で回避）。
@@ -393,3 +392,7 @@ PR/レビュー・Lint ルール
 - [ ] 読み出しは snake 優先＋camel 互換（getField_/pickField 使用）
 - [ ] 新規 JSON（staging/ケースフォルダ）のキーは snake
 - [ ] ドキュメントの例コードも命名規約に従っている
+### 通知メール（FormMailer → GAS）
+
+- META ブロックの `secret` は Script Properties `NOTIFY_SECRET`（未設定時は `FM-BAS`）と突き合わせて検証。
+- 取込処理は `forms_ingest_core.js` に集約し、ScriptLock で競合を抑止。保存前に `case_key` を設定し、同一 `form_key/submission_id` の JSON は上書き保存。
