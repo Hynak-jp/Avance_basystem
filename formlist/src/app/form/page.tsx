@@ -7,7 +7,7 @@ import { makeFormUrl, makeIntakeUrl } from '@/lib/formUrl';
 import { headers } from 'next/headers';
 import { tsSec, payloadV2, signV2, b64UrlFromString } from '@/lib/sig';
 import { unstable_noStore as noStore } from 'next/cache';
-// headers は不要。内部 API には相対パスで十分。
+// headers はリダイレクト用 URL の絶対化に使用。
 
 // サーバー動作の安定化（SSRで毎回取得）
 export const dynamic = 'force-dynamic';
@@ -43,10 +43,10 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
       storeKey: 's2002_userform',
     },
     {
-      formId: '308463',
+      formId: '315397',
       title: 'S2005 債権者一覧表',
       description: '債権者情報を記入します',
-      baseUrl: 'https://business.form-mailer.jp/fms/47a7602b302516',
+      baseUrl: 'https://business.form-mailer.jp/fms/5e2a5d6a315397',
       formKey: 's2005_creditors',
       storeKey: 's2005_creditors',
     },
@@ -83,18 +83,18 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
       storeKey: 's2010_p3_discharge',
     },
     {
-      formId: '308466',
+      formId: 'DUMMY', // 仮ID 実装時に変更予定
       title: 'S2011 家計収支提出フォーム(1/2)',
       description: '申立前２か月分の家計収支表を記入します',
-      baseUrl: 'https://business.form-mailer.jp/fms/0f10ce9b307065',
+      baseUrl: 'https://business.form-mailer.jp/fms/dummy-url-1', // 仮URL 実装時に変更予定
       formKey: 's2011_income_month1',
       storeKey: 's2011_income_month1',
     },
     {
-      formId: '308466',
+      formId: 'DUMMY', // 仮ID 実装時に変更予定
       title: 'S2011 家計収支提出フォーム(2/2)',
       description: '申立前2か月分の家計収支表を記入します',
-      baseUrl: 'https://business.form-mailer.jp/fms/dummy-url-2',
+      baseUrl: 'https://business.form-mailer.jp/fms/dummy-url-2', // 仮URL 実装時に変更予定
       formKey: 's2011_income_month2',
       storeKey: 's2011_income_month2',
     },
@@ -141,8 +141,7 @@ export default async function FormPage() {
       const ts = tsSec();
       const pld = payloadV2(lid, cid || '', ts);
       const url = new URL(`${origin}/api/status`);
-      url.searchParams.set('lineId', lid);
-      url.searchParams.set('caseId', cid || '');
+      // 内部APIはヘッダで lineId/caseId を受ける方針に統一（PII のクエリ露出を避ける）
       url.searchParams.set('ts', ts);
       url.searchParams.set('sig', signV2(pld));
       url.searchParams.set('p', b64UrlFromString(pld));
@@ -158,12 +157,41 @@ export default async function FormPage() {
     }
   }
 
-  let status: StatusResponse | null = await callStatusOnce(lineId, null);
+  const primaryStatusPromise = callStatusOnce(lineId, null);
+  const fallbackStatusPromise = (async () => {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return callStatusOnce(lineId, null);
+  })();
+  let status: StatusResponse | null = null;
+  try {
+    status = await Promise.any([
+      primaryStatusPromise.then((res) => {
+        if (res) return res;
+        throw new Error('empty status');
+      }),
+      fallbackStatusPromise.then((res) => {
+        if (res) return res;
+        throw new Error('empty status');
+      }),
+    ]);
+  } catch (_) {
+    const primary = await primaryStatusPromise;
+    if (primary) {
+      status = primary;
+    } else {
+      const fallback = await Promise.race([
+        fallbackStatusPromise,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 800)),
+      ]);
+      status = fallback ?? null;
+    }
+  }
   if (!status?.intakeReady) {
-    // 800ms 後にもう一発（保存→収集のレースに強く）
-    await new Promise((r) => setTimeout(r, 800));
-    const s2 = await callStatusOnce(lineId, status?.caseId ?? status?.activeCaseId ?? null);
-    if (s2) status = s2;
+    const candidateCaseId = status?.caseId ?? status?.activeCaseId ?? null;
+    if (candidateCaseId) {
+      const s2 = await callStatusOnce(lineId, candidateCaseId);
+      if (s2) status = s2;
+    }
   }
 
   const rawCaseId = status?.caseId ?? status?.activeCaseId ?? null;
@@ -176,7 +204,12 @@ export default async function FormPage() {
   const fallbackIntakeFormId = forms[0]?.formId;
   const preferredIntakeFormId =
     intakeFormIdEnv && intakeFormIdEnv.length > 0 ? intakeFormIdEnv : fallbackIntakeFormId;
-  const intakeBase = process.env.NEXT_PUBLIC_INTAKE_FORM_URL!;
+  const intakeBase =
+    process.env.NEXT_PUBLIC_INTAKE_FORM_URL ??
+    forms.find((f) => f.formKey === 'intake_form')?.baseUrl ??
+    'https://business.form-mailer.jp/fms/47a7602b302516';
+  const userEmail = session?.user?.email ?? '';
+
   const formsWithHref = forms.map((f, index) => {
     const isIntakeForm =
       preferredIntakeFormId && preferredIntakeFormId.length > 0
@@ -187,13 +220,19 @@ export default async function FormPage() {
     const redirectUrl = new URL('/done', origin);
     redirectUrl.searchParams.set('formId', f.formId);
     if (f.formKey) redirectUrl.searchParams.set('formKey', f.formKey);
-    const storeKeyParam = f.storeKey || f.formKey || f.formId;
+    const storeKeyParam = f.storeKey ?? f.formKey ?? f.formId;
     if (storeKeyParam) redirectUrl.searchParams.set('storeKey', storeKeyParam);
     if (caseId) redirectUrl.searchParams.set('caseId', caseId);
-    redirectUrl.searchParams.set('bust', '1');
-    redirectUrl.searchParams.set('lineId', lineId!);
+    redirectUrl.searchParams.set('bust', tsSec());
     if (isIntakeForm) redirectUrl.searchParams.set('form', 'intake');
     const redirectForForm = redirectUrl.toString();
+    const allowPrefill = f.formKey === 's2002_userform' || f.formKey === 's2005_creditors';
+    const extraPrefill =
+      f.formKey === 's2002_userform' && userEmail
+        ? {
+            email: userEmail,
+          }
+        : undefined;
     if (!locked) {
       if (isIntakeForm) {
         signedHref =
@@ -201,6 +240,9 @@ export default async function FormPage() {
             ? makeFormUrl(f.baseUrl, lineId!, caseId, {
                 redirectUrl: redirectForForm,
                 formId: f.formId,
+                formKey: f.formKey,
+                prefill: allowPrefill,
+                extraPrefill,
                 lineIdQueryKeys: [],
                 caseIdQueryKeys: ['case_id[0]'],
               })
@@ -211,6 +253,10 @@ export default async function FormPage() {
         signedHref = makeFormUrl(f.baseUrl, lineId!, caseId, {
           redirectUrl: redirectForForm,
           formId: f.formId,
+          formKey: f.formKey,
+          // NOTE: S2005 は allowlist でも実際に渡すのは case_id のみ（email / seq は意図的に未付与）
+          prefill: allowPrefill,
+          extraPrefill,
           lineIdQueryKeys: [],
           caseIdQueryKeys: ['case_id[0]'],
         });
@@ -238,7 +284,7 @@ export default async function FormPage() {
       disabled,
       disabledReason,
       completed: intakeCompleted,
-      storeKey: f.storeKey || f.formKey || f.formId,
+      storeKey: storeKeyParam,
     };
   });
 

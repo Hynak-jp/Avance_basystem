@@ -23,13 +23,11 @@ export default function DoneClient({ lineId }: { lineId: string }) {
   const formKeyParam = search.get('formKey') || '';
   const storeKeyParam = search.get('storeKey') || '';
   const form = search.get('form') || '';
-  const storeKey = storeKeyParam || formKeyParam || 'unknown';
+  const storeKey = storeKeyParam || formKeyParam || (formId !== 'unknown' ? `form:${formId}` : 'unknown');
   const pParam = search.get('p') || '';
   const tsParam = search.get('ts') || '';
   const sigParam = search.get('sig') || '';
   const caseIdParam = search.get('caseId') || '';
-  const queryLineId = search.get('lineId') || '';
-
   const store = makeProgressStore(lineId)();
   const normalizeCaseId = (value: string | null | undefined) => {
     if (!value) return '';
@@ -42,6 +40,7 @@ export default function DoneClient({ lineId }: { lineId: string }) {
   useEffect(() => {
     if (!lineId) return;
     let cancelled = false;
+    const bust = Math.floor(Date.now() / 1000);
 
     const readPending = (): { pending: PendingFormInfo | null; expired: boolean } => {
       if (typeof window === 'undefined') return { pending: null, expired: false };
@@ -98,13 +97,13 @@ export default function DoneClient({ lineId }: { lineId: string }) {
         try {
           const statusParams = new URLSearchParams();
           statusParams.set('action', 'status');
-          statusParams.set('bust', '1');
-          statusParams.set('lineId', lineId);
+          statusParams.set('bust', String(bust));
           const normalizedCaseId = normalizedCaseIdParam;
           if (pParam) statusParams.set('p', pParam);
           if (tsParam) statusParams.set('ts', tsParam);
           if (sigParam) statusParams.set('sig', sigParam);
           if (normalizedCaseId) statusParams.set('caseId', normalizedCaseId);
+          // NOTE: /api/status への GET は署名 (p/ts/sig) + caseId のみ。lineId はヘッダ x-line-id で渡す。
           await fetch(`/api/status?${statusParams.toString()}`, {
             method: 'GET',
             headers: { 'x-line-id': lineId },
@@ -133,7 +132,6 @@ export default function DoneClient({ lineId }: { lineId: string }) {
       ackParams.set('p', pParam);
       ackParams.set('ts', tsParam);
       ackParams.set('sig', sigParam);
-      ackParams.set('lineId', lineId);
       if (normalizedCaseId) ackParams.set('caseId', normalizedCaseId);
       let ackOk = false;
       try {
@@ -149,11 +147,10 @@ export default function DoneClient({ lineId }: { lineId: string }) {
 
       const statusParams = new URLSearchParams();
       statusParams.set('action', 'status');
-      statusParams.set('bust', '1');
+      statusParams.set('bust', String(bust));
       statusParams.set('p', pParam);
       statusParams.set('ts', tsParam);
       statusParams.set('sig', sigParam);
-      statusParams.set('lineId', lineId);
       if (normalizedCaseId) statusParams.set('caseId', normalizedCaseId);
       let statusOk = false;
       try {
@@ -202,7 +199,7 @@ export default function DoneClient({ lineId }: { lineId: string }) {
         const r = await fetch('/api/status', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-line-id': lineId },
-          body: JSON.stringify({ ...baseBody, action: 'status', bust: 1 }),
+          body: JSON.stringify({ ...baseBody, action: 'status', bust }),
           cache: 'no-store',
         });
         statusOk = r.ok;
@@ -220,7 +217,7 @@ export default function DoneClient({ lineId }: { lineId: string }) {
       }
       const body = {
         action: 'status',
-        bust: 1,
+        bust,
         lineId,
         caseId: normalizedCaseId,
         mode: 'server' as const,
@@ -247,7 +244,7 @@ export default function DoneClient({ lineId }: { lineId: string }) {
       const localKey =
         storeKey !== 'unknown'
           ? storeKey
-          : pending?.formKey || pending?.storeKey || formKeyParam || storeKeyParam || '';
+          : pending?.storeKey || pending?.formKey || formKeyParam || storeKeyParam || formId || '';
       const intakeHandled = await runIntakeComplete(localKey);
       if (cancelled) return;
       if (intakeHandled) return;
@@ -268,7 +265,6 @@ export default function DoneClient({ lineId }: { lineId: string }) {
       } else {
         console.warn('form_ack skipped: context not found', {
           hasSignature,
-          queryLineId,
           storeKeyParam,
         });
       }
@@ -293,7 +289,6 @@ export default function DoneClient({ lineId }: { lineId: string }) {
     tsParam,
     sigParam,
     caseIdParam,
-    queryLineId,
     lineId,
     router,
   ]);
