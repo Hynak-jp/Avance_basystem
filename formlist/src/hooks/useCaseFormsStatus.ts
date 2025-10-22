@@ -1,5 +1,6 @@
 'use client';
-
+// 役割: クライアントでフォーム進捗状態を管理し、ストアと同期するためのカスタム React フック。
+// 注意: GAS との整合を保つため、API エンドポイントやレスポンス形に依存する箇所を変更する際はサーバー側の契約を確認すること。
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 export type CaseFormStatus = {

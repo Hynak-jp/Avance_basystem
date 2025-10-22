@@ -1,5 +1,6 @@
 'use client';
-
+// 役割: フォーム一覧で1カードを描画し、進捗や遷移リンクの状態を可視化するクライアントコンポーネント。
+// 注意: props はサーバー側で構築されるため、リンク可否や disabled 条件を変える場合は整合するサーバー処理を忘れず更新すること。
 import Link from 'next/link';
 import { makeProgressStore, FormStatus } from '@/lib/progressStore';
 import type { CaseFormStatus } from '@/hooks/useCaseFormsStatus';

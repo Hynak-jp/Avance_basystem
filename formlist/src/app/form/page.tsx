@@ -1,3 +1,5 @@
+// 役割: 認証済みユーザー向けのフォーム一覧を SSR で描画し、署名付きリンクを提供する Next.js ページ。
+// 注意: サーバーサイド fetch はヘッダ経由で PII を渡すこと・フェッチ順はロック回避のため変更に注意。
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { redirect } from 'next/navigation';
@@ -83,20 +85,20 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
       storeKey: 's2010_p3_discharge',
     },
     {
-      formId: 'DUMMY', // 仮ID 実装時に変更予定
-      title: 'S2011 家計収支提出フォーム(1/2)',
-      description: '申立前２か月分の家計収支表を記入します',
-      baseUrl: 'https://business.form-mailer.jp/fms/dummy-url-1', // 仮URL 実装時に変更予定
-      formKey: 's2011_income_month1',
-      storeKey: 's2011_income_month1',
+      formId: '315503',
+      title: 'S2011 家計収支提出（申立2か月前分）',
+      description: '申立前2か月分の家計収支表を記入します',
+      baseUrl: 'https://business.form-mailer.jp/fms/d9430156315503',
+      formKey: 's2011_income_m2',
+      storeKey: 's2011_income_m2',
     },
     {
-      formId: 'DUMMY', // 仮ID 実装時に変更予定
-      title: 'S2011 家計収支提出フォーム(2/2)',
-      description: '申立前2か月分の家計収支表を記入します',
-      baseUrl: 'https://business.form-mailer.jp/fms/dummy-url-2', // 仮URL 実装時に変更予定
-      formKey: 's2011_income_month2',
-      storeKey: 's2011_income_month2',
+      formId: '315521',
+      title: 'S2011 家計収支提出（申立1か月前分）',
+      description: '申立前1か月分の家計収支表を記入します',
+      baseUrl: 'https://business.form-mailer.jp/fms/9e4a29d1315521',
+      formKey: 's2011_income_m1',
+      storeKey: 's2011_income_m1',
     },
     {
       formId: '307065',

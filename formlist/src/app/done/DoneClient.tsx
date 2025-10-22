@@ -1,5 +1,6 @@
 'use client';
-
+// 役割: フォーム送信完了後にローカル進捗を更新し、/status API と同期するクライアント用完了ページ。
+// 注意: fetch は Abort 等で制御しているため、依存配列やローカルストレージ操作を変更する際は二重送信に注意。
 import { useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { makeProgressStore } from '@/lib/progressStore';

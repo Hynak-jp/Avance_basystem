@@ -1,4 +1,6 @@
 // formlist/src/lib/formUrl.ts
+// 役割: GAS と連携する署名付き FormMailer URL を生成し、リダイレクトやプレフィルを制御する。
+// 注意: PII をクエリに出さない方針を維持すること、allowlist 以外の項目を追加しないこと。
 import 'server-only';
 import crypto from 'crypto';
 
