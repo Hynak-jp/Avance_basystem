@@ -50,7 +50,9 @@ export default function FormCard({
   };
   const normalizedCaseId = normalizeCaseId(caseId);
   const isIntakeForm = (formKey || storeKey || progressKey) === 'intake';
-  const fallback = disabled
+  // intake は常に有効扱いにするため、外部からの disabled を無視して判定する
+  const internalDisabled = isIntakeForm ? false : !!disabled;
+  const fallback = internalDisabled
     ? undefined
     : (() => {
         const url = new URL(baseUrl);
@@ -76,7 +78,7 @@ export default function FormCard({
 
   const isDone = effectiveStatus === 'done';
   const serverCanEdit = !isIntakeForm && serverStatus ? serverStatus.canEdit : undefined;
-  const baseDisabled = disabled || !signedHref;
+  const baseDisabled = internalDisabled || !signedHref;
   const finalDisabled = serverCanEdit !== undefined ? !serverCanEdit || !signedHref : baseDisabled;
   const needsCaseId = !isIntakeForm;
   const hasCaseId = Boolean(normalizedCaseId);
