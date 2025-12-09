@@ -54,7 +54,7 @@ export default function FormCard({
     ? undefined
     : (() => {
         const url = new URL(baseUrl);
-        const redirectUrl = new URL('https://formlist.vercel.app/done');
+        const redirectUrl = new URL('/done', window.location.origin);
         redirectUrl.searchParams.set('formId', formId);
         url.searchParams.set('line_id[0]', lineId);
         url.searchParams.set('form_id', formId);
@@ -75,7 +75,7 @@ export default function FormCard({
   }
 
   const isDone = effectiveStatus === 'done';
-  const serverCanEdit = serverStatus ? serverStatus.canEdit : undefined;
+  const serverCanEdit = !isIntakeForm && serverStatus ? serverStatus.canEdit : undefined;
   const baseDisabled = disabled || !signedHref;
   const finalDisabled = serverCanEdit !== undefined ? !serverCanEdit || !signedHref : baseDisabled;
   const needsCaseId = !isIntakeForm;
