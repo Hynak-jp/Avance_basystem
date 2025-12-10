@@ -49,7 +49,11 @@ export default function FormCard({
     return digits.slice(-4).padStart(4, '0');
   };
   const normalizedCaseId = normalizeCaseId(caseId);
-  const isIntakeForm = (formKey || storeKey || progressKey) === 'intake';
+  const isIntakeForm =
+    [formId, formKey, storeKey, progressKey]
+      .filter((v): v is string => typeof v === 'string')
+      .map((v) => v.toLowerCase())
+      .some((v) => v.includes('intake')) || title.includes('初回受付');
   // intake は常に有効扱いにするため、外部からの disabled を無視して判定する
   const internalDisabled = isIntakeForm ? false : !!disabled;
   const fallback = internalDisabled
@@ -153,21 +157,20 @@ export default function FormCard({
 
   const linkHref = signedHref ?? '';
 
-  const debug = isIntakeForm
-    ? {
-        formId,
-        formKey,
-        storeKey,
-        isIntakeForm,
-        disabled,
-        internalDisabled,
-        hasCaseId,
-        caseGuardActive,
-        signedHrefExists: !!signedHref,
-        finalDisabled,
-        serverStatus,
-      }
-    : null;
+  const debug = {
+    formId,
+    formKey,
+    storeKey,
+    progressKey,
+    isIntakeForm,
+    disabled,
+    internalDisabled,
+    hasCaseId,
+    caseGuardActive,
+    signedHrefExists: !!signedHref,
+    finalDisabled,
+    serverStatus,
+  };
 
   return (
     <div className={containerClass}>
