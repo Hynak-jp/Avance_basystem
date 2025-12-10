@@ -151,6 +151,8 @@ export default function FormCard({
     }
   };
 
+  const linkHref = signedHref ?? '';
+
   const debug = isIntakeForm
     ? {
         formId,
@@ -201,7 +203,7 @@ export default function FormCard({
         </>
       ) : (
         <Link
-          href={signedHref}
+          href={linkHref}
           prefetch={false}
           onClick={handleClick}
           className="inline-block px-3 py-2 rounded bg-black text-white"
