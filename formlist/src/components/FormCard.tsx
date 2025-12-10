@@ -98,13 +98,18 @@ export default function FormCard({
   const containerClass = `rounded-lg border p-4 ${
     isClickable ? '' : 'bg-gray-50 text-gray-500 opacity-60 pointer-events-none'
   }`;
-  let label = isDone
-    ? '（完了）'
-    : isDisabled
-    ? '（受付処理中）'
-    : effectiveStatus === 'in_progress'
-    ? '（入力中）'
-    : '（未入力）';
+  let label: string;
+  if (isDone) {
+    label = '（完了）';
+  } else if (caseGuardActive) {
+    label = '（初回受付待ち）';
+  } else if (isDisabled) {
+    label = '（受付処理中）';
+  } else if (effectiveStatus === 'in_progress') {
+    label = '（入力中）';
+  } else {
+    label = '（未入力）';
+  }
 
   if (serverStatus) {
     if (!serverStatus.canEdit && (serverStatus.status === 'submitted' || serverStatus.status === 'closed')) {
@@ -157,29 +162,8 @@ export default function FormCard({
 
   const linkHref = signedHref ?? '';
 
-  const debug = {
-    formId,
-    formKey,
-    storeKey,
-    progressKey,
-    isIntakeForm,
-    disabled,
-    internalDisabled,
-    hasCaseId,
-    caseGuardActive,
-    signedHrefExists: !!signedHref,
-    finalDisabled,
-    serverStatus,
-  };
-
   return (
     <div className={containerClass}>
-      {/* intake カードだけの簡易デバッグ表示 */}
-      {debug && (
-        <pre className="mb-2 text-[10px] text-gray-400 whitespace-pre-wrap break-all">
-          {JSON.stringify(debug, null, 2)}
-        </pre>
-      )}
       <h3 className="font-semibold">
         {title} <span className="text-sm text-gray-500">{label}</span>
       </h3>
