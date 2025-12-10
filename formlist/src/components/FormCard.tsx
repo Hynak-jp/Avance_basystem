@@ -83,7 +83,12 @@ export default function FormCard({
   const needsCaseId = !isIntakeForm;
   const hasCaseId = Boolean(normalizedCaseId);
   const caseGuardActive = needsCaseId && !hasCaseId;
-  const isClickable = !!signedHref && !finalDisabled && !isDone && !caseGuardActive;
+  // まず通常ロジックで判定
+  let isClickable = !!signedHref && !finalDisabled && !isDone && !caseGuardActive;
+  // intake は href があれば必ず開けるように強制上書き
+  if (isIntakeForm && signedHref && !isDone) {
+    isClickable = true;
+  }
   const isDisabled = !isClickable && !isDone;
 
   const containerClass = `rounded-lg border p-4 ${
@@ -146,8 +151,30 @@ export default function FormCard({
     }
   };
 
+  const debug = isIntakeForm
+    ? {
+        formId,
+        formKey,
+        storeKey,
+        isIntakeForm,
+        disabled,
+        internalDisabled,
+        hasCaseId,
+        caseGuardActive,
+        signedHrefExists: !!signedHref,
+        finalDisabled,
+        serverStatus,
+      }
+    : null;
+
   return (
     <div className={containerClass}>
+      {/* intake カードだけの簡易デバッグ表示 */}
+      {debug && (
+        <pre className="mb-2 text-[10px] text-gray-400 whitespace-pre-wrap break-all">
+          {JSON.stringify(debug, null, 2)}
+        </pre>
+      )}
       <h3 className="font-semibold">
         {title} <span className="text-sm text-gray-500">{label}</span>
       </h3>
