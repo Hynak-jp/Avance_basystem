@@ -2,18 +2,9 @@
 
 const SCHEMA = {
   contacts: [
+    // 必須（最小運用）
     'line_id',
-    'email',
-    'email_hash',
-    'display_name',
-    'first_seen_at',
-    'last_seen_at',
-    'last_form',
-    'last_submit_ym',
-    'notes',
     'user_key',
-    'root_folder_id',
-    'next_case_seq',
     'active_case_id',
     'updated_at',
     'intake_at',
@@ -46,6 +37,15 @@ const SCHEMA = {
 
 // ====== 公開関数（UIから実行／トリガー対象）======
 
+function getMasterSheetId_() {
+  const props = PropertiesService.getScriptProperties();
+  return (
+    props.getProperty('SHEET_ID') ||
+    props.getProperty('BAS_MASTER_SPREADSHEET_ID') ||
+    ''
+  ).trim();
+}
+
 // 1) SHEET_ID 設定
 function setSheetId() {
   const NEW_SHEET_ID = '1G1IPbmGM1USdpRb9T6-56qggBEzyo-DF0zMUAn0ui6o'; // ←必要に応じて更新
@@ -75,6 +75,9 @@ function nightlySchemaWatch() {
 
 // 4) トリガーのインストール／アンインストール
 function installNightlyTrigger() {
+  ScriptApp.getProjectTriggers().forEach((t) => {
+    if (t.getHandlerFunction() === 'nightlySchemaWatch') ScriptApp.deleteTrigger(t);
+  });
   ScriptApp.newTrigger('nightlySchemaWatch').timeBased().atHour(2).everyDays(1).create();
   Logger.log('Installed nightly schema trigger.');
 }
@@ -92,8 +95,8 @@ function removeNightlyTrigger() {
 // ====== 内部ヘルパー（末尾 _ OK）======
 
 function validateMasterInternal_() {
-  const sid = PropertiesService.getScriptProperties().getProperty('SHEET_ID');
-  if (!sid) throw new Error('SHEET_ID not set.');
+  const sid = getMasterSheetId_();
+  if (!sid) throw new Error('SHEET_ID / BAS_MASTER_SPREADSHEET_ID not set.');
   const ss = SpreadsheetApp.openById(sid);
 
   const results = [];
@@ -103,7 +106,10 @@ function validateMasterInternal_() {
       results.push({ sheet: name, ok: false, error: 'missing sheet' });
       return;
     }
-    const header = (sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0] || []).map(String);
+    const lastCol = Math.max(1, sh.getLastColumn());
+    const header = (sh.getRange(1, 1, 1, lastCol).getValues()[0] || [])
+      .map((v) => String(v || '').trim())
+      .filter((v) => v);
     const want = SCHEMA[name];
     const missing = want.filter((c) => !header.includes(c));
     const extras = header.filter((c) => !want.includes(c));

@@ -1,6 +1,8 @@
 /**
  * status_api.js
  *  - WebApp doGet ルート（フォーム受領状況・再開操作）
+ * 役割: GAS WebApp の /status エンドポイント群のルーティングと検証。
+ * 注意: allowedParams や署名ロジックを弄る際はクライアント側の署名生成と同時更新が必須。
  *  - 署名方式（互換）
  *    V1: sig = HEX(HMAC_SHA256(`${ts}.${lineId}.${caseId}`, SECRET))
  *    V2: p = base64url(`${lineId}|${caseId}|${ts}`), sig = base64url(HMAC_SHA256(payload, SECRET))

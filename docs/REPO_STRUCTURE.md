@@ -128,7 +128,7 @@ gas/backend/src/
 - `appsscript.json`：スコープ/高度なサービス（Drive, Vision）設定
 
 > Script Properties（抜粋）  
-> `NOTIFY_SECRET`（通知検証用シークレット。未設定時は `FM-BAS` を利用）/ `BAS_MASTER_SPREADSHEET_ID` / `ROOT_FOLDER_ID` / `DRIVE_ROOT_FOLDER_ID` など。
+> `NOTIFY_SECRET`（通知検証用シークレット）/ `BAS_MASTER_SPREADSHEET_ID` / `ROOT_FOLDER_ID` / `DRIVE_ROOT_FOLDER_ID` / `ROUTER_MAX_THREADS`（通知処理1バッチ当たりのスレッド上限、既定30）/ `ENFORCE_SID_14`（`1` で submission_id を常に14桁に強制）/ `INGEST_CONFIG_BUST`（値を変えると取込側キャッシュを即時クリア）など。
 
 gas/hello-world/src/
 

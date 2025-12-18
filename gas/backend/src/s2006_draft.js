@@ -2,6 +2,7 @@
  * S2006（公租公課）テンプレ差し込み → drafts 保存
  *
  * 前提:
+ * - 注意: シート構成や行番号を変更する場合は ROW マッピングと書き込み位置を合わせて更新すること
  * - Script Properties:
  *     S2006_TEMPLATE_GSHEET_ID : テンプレ（Googleスプレッドシート）ファイルID
  * - 既存ユーティリティ:
@@ -116,14 +117,18 @@ function generateS2006SheetDraft_(caseInfo, parsed) {
     const r = ROW[key];
     const rec = (M.taxes && M.taxes[key]) || {};
     put(r, 2, asIntOrBlank_(rec.amount)); // B
-    put(r, 3, rec.year || ''); // C
+    const yearText = String(rec.year || '').replace(/^(\d{4})年(\d{1,2})月$/, function (_, y, m) {
+      return y + '-' + ('0' + m).slice(-2);
+    });
+    put(r, 3, yearText); // C
     if (key === 'vehicle_tax') {
       const dText = composeVehicleDCell_(rec);
       put(r, 4, dText);
       wrap_(sh.getRange(r, 4));
       try {
-        const next = sh.getRange(r + 1, 4).getDisplayValue();
-        if (/登録番号/.test(next)) sh.getRange(r + 1, 4).clearContent();
+        const nextRng = sh.getRange(r + 1, 4);
+        const next = nextRng.getDisplayValue().trim();
+        if (/登録番号/.test(next) || /^[()（）\s]*$/.test(next)) nextRng.clearContent();
       } catch (_) {}
     } else {
       put(r, 4, rec.payer || '');
@@ -132,7 +137,12 @@ function generateS2006SheetDraft_(caseInfo, parsed) {
 
   // 合計: テンプレの数式に任せるのが基本。A列に「合計」があるならそこへも書ける。
   const totalRow = ROW.total || findRowByLabel_(sh, '合計');
-  if (totalRow) put(totalRow, 2, asIntOrBlank_(M.totals && M.totals.amount_sum));
+  if (totalRow) {
+    const totalCell = sh.getRange(totalRow, 2);
+    if (!totalCell.getFormula()) {
+      totalCell.setValue(asIntOrBlank_(M.totals && M.totals.amount_sum));
+    }
+  }
 
   try {
     Logger.log(

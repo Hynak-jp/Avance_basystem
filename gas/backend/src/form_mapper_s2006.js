@@ -226,6 +226,9 @@ function mapS2006FieldsToModel_(fields) {
 }
 
 // 登録（forms_ingest_core.js のレジストリへ）
+var globalObj = typeof globalThis !== 'undefined' ? globalThis : this;
+if (!globalObj.FORM_MAPPER_FACTORIES) globalObj.FORM_MAPPER_FACTORIES = {};
+globalObj.FORM_MAPPER_FACTORIES.s2006_creditors_public = mapS2006FieldsToModel_;
 try {
   registerFormMapper('s2006_creditors_public', mapS2006FieldsToModel_);
 } catch (_) {}

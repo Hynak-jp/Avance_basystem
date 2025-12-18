@@ -52,7 +52,7 @@ BAS の実運用キーは次の3つです。役割がぶれないように使い
 
 ### 保存ルール
 
-- JSON: `<formKey>__<submissionId>.json`（`meta.case_id` / `meta.case_key` を格納。submissionId は半角数字に正規化し、META が不正値のときは `submitted_at` →14桁タイムスタンプで再採番）
+- JSON: `<formKey>__<submissionId>.json`（`meta.case_id` / `meta.case_key` を格納。submissionId は半角数字に正規化し、META が不正値のときは `submitted_at` →14桁タイムスタンプで再採番。Script Properties `ENFORCE_SID_14=1` で常に14桁へ強制可能）
 - スタッフ入力: `staff_<caseId>_vN.json`
 - 生成物: `S2002_<caseId>.docx`, `S2011_<caseId>.xls` など
 
@@ -75,7 +75,8 @@ BAS の実運用キーは次の3つです。役割がぶれないように使い
 > 既存の **contacts** は `displayName` を保持してよいが、**Drive のフォルダ名には使わない**。
 
 - **contacts**
-  - `lineId, displayName, userKey, rootFolderId, nextCaseSeq, activeCaseId`
+  - コア: `line_id, user_key, active_case_id, intake_at, updated_at`
+  - 任意（将来の追跡/照合用）: `display_name, email, email_hash, last_seen_at, last_form, last_submit_ym, notes`
 - **cases**
   - `lineId, caseId, createdAt, status, lastActivity`
 - **submissions（任意）**
@@ -226,14 +227,16 @@ staging 吸い上げ
 - エンドポイント: `doGet(e)` の `action=bootstrap`（V2: p/ts/sig）
 - 署名検証: payload=`lineId|caseId|ts` を base64url 署名（p/ts/sig）
 - Script Properties: `BAS_MASTER_SPREADSHEET_ID`, `DRIVE_ROOT_FOLDER_ID`（or `ROOT_FOLDER_ID`）
-- 処理フロー:
-  - `contacts` を upsert（`lineId, displayName, userKey, rootFolderId, nextCaseSeq, activeCaseId`）
-  - `activeCaseId` 未設定なら `allocateNextCaseId_()` で 4 桁採番し `setActiveCaseId_()`
-  - `cases` シートへ 1 行追加（`draft`）
-  - レスポンス: `{ userKey, activeCaseId, rootFolderId }`
+- 処理フロー（冪等）:
+  - `contacts` を upsert（コア: `line_id, user_key, active_case_id, intake_at, updated_at`。`display_name` などは任意）
+  - `active_case_id` が未設定なら、`cases` を参照して **ユーザー単位で 4 桁連番を採番**し `contacts.active_case_id` に保存
+  - `cases` の該当行を保証（`draft`）、Drive に `<user_key>-<active_case_id>/` フォルダを保証して `cases.folder_id` を更新
+  - レスポンス例: `{ userKey, activeCaseId, caseKey, folderId }`（実装で必要最小に絞ってOK）
+- 旧エンドポイント:
+  - `doPost_drive(e)` は **deprecated**（明示的に終了レスポンスを返すだけ）。呼び出し元は持たない想定。
 - JSON 保存拡張:
-  - `saveSubmissionJsonShallow_()` が `meta.case_id` を必ず格納
-  - `resolveCaseId_()` が `META.case_id` → `contacts.activeCaseId` の順で決定
+  - `saveSubmissionJsonShallow_()` は保存直前に `resolveCaseId_()` を通し、**`meta.case_id` を埋めて保存**する
+  - `resolveCaseId_()` の優先順位: `META.case_id` → `contacts.active_case_id`
   - Drive への保存は `<userKey-caseId>/` をルート（個人名は含めない）
 
 ### 7.4 既存データの移行ヘルパ — 追記
@@ -253,17 +256,37 @@ staging 吸い上げ
 
 ### 8.3 FormMailer 側（META テンプレート）
 
-通知メールの META ブロックに `case_id` を必ず出す。例:
+- **intake（初回受付）**: `case_id` はメール本文に存在しない前提でOK（GAS が `contacts.active_case_id` から補完して `meta.case_id` に保存する）
+- **それ以外のフォーム**: 可能なら `case_id` を含める（例: フォームに hidden `case_id` を持たせ、META に書き出す）
+
+例（intake は `case_id` 無し）
+
+```
+==== META START ====
+form_name: %%_FORM_NAME_%%
+form_key: intake
+secret: FM-BAS
+submission_id: %%_SUBMISSION_ID_%%
+submitted_at: %%_SUBMISSION_CREATED_AT_%%
+seq: %%_SEQNUM_%%
+referrer: %%_REFERER_%%
+client_ip: %%_CLIENT_IP_%%
+user_agent: %%_USER_AGENT_%%
+redirect_url: https://formlist.vercel.app/done?formId=302516
+==== META END ====
+```
+
+例（それ以外のフォームは `case_id` を入れるのが望ましい）
 
 ```
 ==== META START ====
 form_name: %%_FORM_NAME_%%
 form_key: s2002_userform
-case_id: %%_CASE_ID_%%
+case_id: <フォームの hidden case_id を差し込み>
 ==== META END ====
 ```
 
-これにより GAS 側が `meta.case_id` を JSON へ確実に保存し、マージ処理で案件単位に束ねられます。
+`case_id` を含められない場合でも、原則 `contacts.active_case_id` から補完できるようにしておく（ただし「過去案件に紐づけたい」等の例外要件が出たら見直し）。
 
 ---
 
@@ -394,5 +417,8 @@ PR/レビュー・Lint ルール
 - [ ] ドキュメントの例コードも命名規約に従っている
 ### 通知メール（FormMailer → GAS）
 
-- META ブロックの `secret` は Script Properties `NOTIFY_SECRET`（未設定時は `FM-BAS`）と突き合わせて検証。
-- 取込処理は `forms_ingest_core.js` に集約し、ScriptLock で競合を抑止。保存前に `case_key` を設定し、同一 `form_key/submission_id` の JSON は上書き保存。
+- Script Properties `NOTIFY_SECRET` は必須。未設定の場合は取込開始時に即エラーとなる。
+- `secret` の照合は **正規化（NFKC/ハイフン統一/空白削除/小文字化）** 後に実施し、件名の `[ #FM-BAS ]` も同ロジックで検証。
+- 取込処理は `forms_ingest_core.js` に集約し、ScriptLock + CacheService（`ingest:<messageId>`）で競合・二重実行を抑止。
+- 保存前に `case_key`, `received_at`, `received_tz`, `ingest_subject` を補完し、同一 `form_key/submission_id` の JSON は上書き保存。
+- `secret` 不一致などの拒否は `FormAttach/Rejected` ラベルへ隔離し、構文エラー等は `FormAttach/Error`、META欠落は `FormAttach/NoMeta`（24h 経過で Archive）へ退避する。

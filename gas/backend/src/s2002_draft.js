@@ -721,11 +721,24 @@ function updateCasesRow_(caseId, patch) {
 
 function saveSubmissionJson_(caseFolderId, parsed) {
   const parent = DriveApp.getFolderById(caseFolderId);
-  const sid =
+  const tz =
+    (typeof Session !== 'undefined' &&
+      Session.getScriptTimeZone &&
+      Session.getScriptTimeZone()) ||
+    'Asia/Tokyo';
+  let sid =
     parsed && parsed.meta && parsed.meta.submission_id
       ? String(parsed.meta.submission_id)
-      : String(Date.now());
-  const fname = `${parsed.meta.form_key}__${sid}.json`;
+      : '';
+  sid = sid.replace(/[^\d]/g, '');
+  if (!sid) {
+    sid = Utilities.formatDate(new Date(), tz, 'yyyyMMddHHmmss');
+  }
+  const safeKey = String(parsed && parsed.meta && parsed.meta.form_key ? parsed.meta.form_key : 'unknown').replace(
+    /[^a-z0-9_]/gi,
+    '_'
+  );
+  const fname = `${safeKey}__${sid}.json`;
   const content = JSON.stringify(parsed, null, 2);
   let existing = null;
   const dupIt = parent.getFilesByName(fname);

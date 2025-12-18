@@ -1650,8 +1650,6 @@ function upsertContact_(ss, lineId, displayName) {
       'line_id',
       'display_name',
       'user_key',
-      'root_folder_id',
-      'next_case_seq',
       'active_case_id',
     ]);
   }
@@ -1665,8 +1663,6 @@ function upsertContact_(ss, lineId, displayName) {
   HEADERS[K.lineId] = 'line_id';
   HEADERS[K.displayName] = 'display_name';
   HEADERS[K.userKey] = 'user_key';
-  HEADERS[K.rootFolderId] = 'root_folder_id';
-  HEADERS[K.nextCaseSeq] = 'next_case_seq';
   HEADERS[K.activeCaseId] = 'active_case_id';
   Object.keys(HEADERS).forEach((canon) => {
     if (idxMap[canon] === undefined) {
@@ -1731,46 +1727,6 @@ function upsertContact_(ss, lineId, displayName) {
       activeCaseId: String(getCellByKey_(rowVals, idxMap, K.activeCaseId) || ''),
     };
   }
-}
-
-function allocateNextCaseId_(lineId) {
-  const ss = openOrCreateMaster_();
-  const sh = ss.getSheetByName('contacts');
-  const header = sh.getRange(1, 1, 1, Math.max(1, sh.getLastColumn())).getValues()[0].map(String);
-  let idxMap =
-    typeof buildHeaderIndexMap_ === 'function'
-      ? buildHeaderIndexMap_(header)
-      : header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
-  const ensureKey = (canon, headerName) => {
-    if (idxMap[canon] === undefined) {
-      const col = sh.getLastColumn() + 1;
-      sh.getRange(1, col).setValue(headerName);
-      header.push(headerName);
-      idxMap =
-        typeof buildHeaderIndexMap_ === 'function'
-          ? buildHeaderIndexMap_(header)
-          : header.reduce((m, v, i) => ((m[String(v)] = i), m), {});
-    }
-  };
-  ensureKey(K.lineId, 'line_id');
-  ensureKey(K.nextCaseSeq, 'next_case_seq');
-
-  const rowCount = sh.getLastRow() - 1;
-  const lastCol = sh.getLastColumn();
-  const rows = rowCount > 0 ? sh.getRange(2, 1, rowCount, lastCol).getValues() : [];
-  const colLine0 = idxMap[K.lineId];
-  const colNext0 = idxMap[K.nextCaseSeq];
-  for (let i = 0; i < rows.length; i++) {
-    if (String(rows[i][colLine0] || '') === String(lineId)) {
-      let cur = parseInt(rows[i][colNext0] || 0, 10);
-      if (!isFinite(cur)) cur = 0;
-      const next = cur + 1;
-      const padded = String(next).padStart(4, '0');
-      sh.getRange(i + 2, colNext0 + 1).setValue(next);
-      return padded;
-    }
-  }
-  throw new Error('lineId not found in contacts');
 }
 
 function setActiveCaseId_(ss, lineId, caseId) {
@@ -1858,27 +1814,14 @@ function resolveCaseId_(mailPlainBody, subject, lineId) {
 }
 
 function doPost_drive(e) {
-  try {
-    const req = JSON.parse((e && e.postData && e.postData.contents) || '{}');
-    const { lineId, displayName, ts, sig } = req || {};
-    if (!verifySig_(String(lineId || '') + '|' + String(ts || ''), sig)) {
-      return json_({ error: 'bad_sig' }, 403);
-    }
-    const ss = openOrCreateMaster_();
-    const contact = upsertContact_(ss, lineId, displayName);
-    let active = contact.activeCaseId;
-    if (!active) {
-      active = allocateNextCaseId_(lineId);
-      setActiveCaseId_(ss, lineId, active);
-      casesAppend_(lineId, active);
-    }
-    return json_(
-      { userKey: contact.userKey, activeCaseId: active, rootFolderId: contact.rootFolderId },
-      200
-    );
-  } catch (err) {
-    return json_({ error: String(err) }, 500);
-  }
+  try { Logger.log('[DEPRECATED] doPost_drive called'); } catch (_) {}
+  return ContentService.createTextOutput(
+    JSON.stringify({
+      ok: false,
+      error: 'deprecated',
+      hint: 'drive endpoint retired. Use intake/bootstrap flow.',
+    })
+  ).setMimeType(ContentService.MimeType.JSON);
 }
 
 function inferDisplayNameFromLedger_(lineId) {

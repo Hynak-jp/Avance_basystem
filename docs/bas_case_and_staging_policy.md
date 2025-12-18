@@ -19,7 +19,7 @@
 6. **救済の限定 ensure**（status 経路）は「本人の intake が実在」する場合のみ許可する。
 7. 署名は **V2（HMAC）を優先**し、**±600秒**の時刻スキュー検証を通過したもののみ処理する。V1はフェイルセーフとして継続。
 8. 並行実行を避けるため、**ScriptLock(〜10秒)** ＋（必要に応じて）短命キャッシュを用いる。
-9. **通知メール（フォーム取込）は NOTIFY_SECRET を検証**し、ScriptLock 内で `case_key` 解決 → JSON 保存（同一ファイルは上書き）の流れを踏む。
+9. **通知メール（フォーム取込）は NOTIFY_SECRET を正規化比較で検証**し、ScriptLock + CacheService で競合/二重実行を避けつつ `case_key` 解決 → JSON 保存（同一ファイルは上書き）の流れを踏む。secret 不一致は `FormAttach/Rejected` へ隔離する。
 
 ---
 
