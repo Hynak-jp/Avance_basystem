@@ -34,8 +34,8 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
       title: '初回受付フォーム',
       description: '初回受付の情報を記入します',
       baseUrl: 'https://business.form-mailer.jp/fms/47a7602b302516',
-      formKey: 'intake_form',
-      storeKey: 'intake_form',
+      formKey: 'intake',
+      storeKey: 'intake',
     },
     {
       formId: '308335',
@@ -100,8 +100,8 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
       title: '書類提出フォーム',
       description: '給与明細などの書類をアップロードします',
       baseUrl: 'https://business.form-mailer.jp/fms/829affd7325669',
-      formKey: 'supporting_documents_payslip_m1',
-      storeKey: 'supporting_documents_payslip_m1',
+      formKey: 'doc_payslip',
+      storeKey: 'doc_payslip',
       hidden: true, // 当面は一覧に出さない（6フォーム運用）
     },
   ];
@@ -121,7 +121,7 @@ export default async function FormPage() {
 
   const formsVisible = forms.filter((form) => {
     if (!form.hidden) return true;
-    if (form.formKey === 'supporting_documents_payslip_m1') {
+    if (form.formKey === 'doc_payslip') {
       return lineId === 'Uc13df94016ee50eb9dd5552bffbe6624';
     }
     return false;
@@ -212,7 +212,7 @@ export default async function FormPage() {
     intakeFormIdEnv && intakeFormIdEnv.length > 0 ? intakeFormIdEnv : fallbackIntakeFormId;
   const intakeBase =
     process.env.NEXT_PUBLIC_INTAKE_FORM_URL ??
-    formsVisible.find((f) => f.formKey === 'intake_form')?.baseUrl ??
+    formsVisible.find((f) => f.formKey === 'intake')?.baseUrl ??
     'https://business.form-mailer.jp/fms/47a7602b302516';
   const userEmail = session?.user?.email ?? '';
 
