@@ -8,8 +8,9 @@ const S2010_SPREADSHEET_ID = PROP_S2010.getProperty('BAS_MASTER_SPREADSHEET_ID')
 const S2010_TPL_GDOC_ID = PROP_S2010.getProperty('S2010_TEMPLATE_GDOC_ID') || '';
 const S2010_LABEL_TO_PROCESS = 'FormAttach/ToProcess';
 const S2010_LABEL_PROCESSED = 'FormAttach/Processed';
-// S2010 の分割フォームが揃っているか判定するための form_key 接頭辞リスト
-const S2010_PART_PREFIXES = ['s2010_p1_', 's2010_p2_', 's2010_p3_'];
+// S2010 の分割フォームが揃っているか判定するための form_key 接頭辞リスト（p1/p2のみ）
+const S2010_PART_PREFIXES = ['s2010_p1_', 's2010_p2_'];
+const S2010_LABEL_CACHE = {};
 
 // チェック記号はS2002と統一
 const CHECKED = '☑';
@@ -18,15 +19,25 @@ function renderCheck_(b) {
   return b ? CHECKED : UNCHECKED;
 }
 
+function s2010_labelOrCreate_(name) {
+  if (!name) return null;
+  if (S2010_LABEL_CACHE[name]) return S2010_LABEL_CACHE[name];
+  const label = GmailApp.getUserLabelByName(name) || GmailApp.createLabel(name);
+  S2010_LABEL_CACHE[name] = label;
+  return label;
+}
+
 /** ====== パブリック・エントリ ====== **/
 
 /**
- * 受信箱から S2010 通知メールを取り込み → JSON 保存 → 必須パートが揃えば統合 JSON を保存
+ * 受信箱から S2010 通知メールを取り込み → JSON 保存 → 必須パートが揃えば統合 JSON 保存 + ドラフト生成
  * ラベル: FormAttach/ToProcess → 処理後に FormAttach/Processed を付与
  */
 function run_ProcessInbox_S2010() {
   const query = `label:${S2010_LABEL_TO_PROCESS} subject:#FM-BAS subject:S2010`;
   const threads = GmailApp.search(query, 0, 50);
+  const processedLabel = s2010_labelOrCreate_(S2010_LABEL_PROCESSED);
+  const toProcessLabel = s2010_labelOrCreate_(S2010_LABEL_TO_PROCESS);
   try {
     Logger.log('[S2010] tick: query=%s threads=%s', query, threads.length);
   } catch (_) {}
@@ -83,22 +94,28 @@ function run_ProcessInbox_S2010() {
           Logger.log('[S2010] placeFile error: %s', (err && err.stack) || err);
         }
 
-        if (typeof updateCasesRow_ === 'function') {
+        const caseIdForProcess = fallbackInfo.caseId || parsed.meta?.case_id || parsed.meta?.caseId || '';
+        const hasCaseIdForProcess = !!caseIdForProcess;
+        if (typeof updateCasesRow_ === 'function' && hasCaseIdForProcess) {
           const patch = {
             case_key: resolvedCaseKey,
             folder_id: caseFolderId,
             user_key: caseInfo.userKey,
             last_activity: new Date(),
           };
-          updateCasesRow_(parsed.meta.case_id, patch);
+          updateCasesRow_(caseIdForProcess, patch);
         }
 
         if (haveAllPartsS2010_(caseInfo.folderId, S2010_PART_PREFIXES)) {
-          run_GenerateS2010MergedJsonByCaseId(caseInfo.caseId);
+          if (hasCaseIdForProcess) {
+            run_GenerateS2010DraftMergedByCaseId(caseIdForProcess);
+          } else {
+            Logger.log('[S2010] case_id is empty. draft generation skipped.');
+          }
         }
 
-        msg.addLabel(GmailApp.getUserLabelByName(S2010_LABEL_PROCESSED));
-        msg.removeLabel(GmailApp.getUserLabelByName(S2010_LABEL_TO_PROCESS));
+        if (processedLabel) msg.addLabel(processedLabel);
+        if (toProcessLabel) msg.removeLabel(toProcessLabel);
       } catch (e) {
         GmailApp.createDraft('me', '[BAS Intake Error]', String(e), {
           htmlBody: `<pre>${safeHtml(e.stack || e)}</pre>`,
@@ -136,13 +153,17 @@ function run_GenerateS2010MergedJsonByCaseId(caseId) {
   info.folderId = ensureCaseFolderId_(info);
 
   const parts = loadLatestPartsByPrefix_(info.folderId, 's2010_');
-  if (!parts.length) throw new Error('No s2010_* json found under case folder.');
+  const requiredParts = sortS2010PartsByPrefixes_(
+    filterS2010PartsByPrefixes_(parts, S2010_PART_PREFIXES),
+    S2010_PART_PREFIXES
+  );
+  if (!requiredParts.length) throw new Error('No required s2010 parts found under case folder.');
 
   if (!haveAllPartsS2010_(info.folderId, S2010_PART_PREFIXES)) {
     throw new Error('Not all required S2010 parts are present yet.');
   }
 
-  const merged = mergeS2010Parts_(parts, { caseId: info.caseId });
+  const merged = mergeS2010Parts_(requiredParts, { caseId: info.caseId });
   const fname = `s2010_userform__merged_${merged.meta.merged_at}.json`;
   DriveApp.getFolderById(info.folderId).createFile(
     Utilities.newBlob(JSON.stringify(merged, null, 2), 'application/json', fname)
@@ -168,10 +189,14 @@ function run_GenerateS2010DraftMergedByCaseId(caseId) {
 
   // 2) ケース直下から最新の各partを収集
   const parts = loadLatestPartsByPrefix_(info.folderId, 's2010_'); // s2010_ で始まるform_keyを全部拾う
-  if (!parts.length) throw new Error('No S2010 part-jsons found.');
+  const requiredParts = sortS2010PartsByPrefixes_(
+    filterS2010PartsByPrefixes_(parts, S2010_PART_PREFIXES),
+    S2010_PART_PREFIXES
+  );
+  if (!requiredParts.length) throw new Error('No required S2010 part-jsons found.');
 
   // 3) マージして統合JSONを作る
-  const merged = mergeS2010Parts_(parts, { caseId: info.caseId }); // { meta, fieldsRaw, model }
+  const merged = mergeS2010Parts_(requiredParts, { caseId: info.caseId }); // { meta, fieldsRaw, model }
 
   // 4) 統合JSONをケース直下に保存（監査用）
   const mergedName = `s2010_userform__merged_${merged.meta.merged_at}.json`;
@@ -217,6 +242,36 @@ function loadLatestPartsByPrefix_(caseFolderId, prefix) {
 
   // 収集結果を配列に
   return Object.keys(latestByKey).map(k => ({ form_key: k, ...latestByKey[k] }));
+}
+
+/** S2010の必須パートのみを残す（旧パート混入の防止） */
+function filterS2010PartsByPrefixes_(parts, prefixes) {
+  return (parts || []).filter((p) => {
+    const key = getS2010FormKey_(p);
+    return prefixes.some((prefix) => String(key).startsWith(prefix));
+  });
+}
+
+function sortS2010PartsByPrefixes_(parts, prefixes) {
+  const ordered = (parts || []).slice();
+  ordered.sort((a, b) => {
+    const ra = getS2010PrefixRank_(getS2010FormKey_(a), prefixes);
+    const rb = getS2010PrefixRank_(getS2010FormKey_(b), prefixes);
+    return ra - rb;
+  });
+  return ordered;
+}
+
+function getS2010PrefixRank_(key, prefixes) {
+  const s = String(key || '');
+  for (let i = 0; i < prefixes.length; i++) {
+    if (s.startsWith(prefixes[i])) return i;
+  }
+  return prefixes.length;
+}
+
+function getS2010FormKey_(part) {
+  return (part && part.json && part.json.meta && part.json.meta.form_key) || part.form_key || '';
 }
 
 /** ===== パーツ配列を 1つの "s2010_userform" JSON に統合 ===== */
@@ -568,7 +623,10 @@ function generateS2010Draft_(caseInfo, parsed) {
 
   const doc = DocumentApp.openById(gdocId);
   const body = doc.getBody();
-  const M = ensureS2010Model_(parsed.model || {});
+  const M = ensureS2010Model_({
+    ...(parsed.model || {}),
+    fieldsRaw: parsed.fieldsRaw || [],
+  });
 
   // 基本情報（テンプレに置いてあれば出ます）
   replaceAll_(body, '{{app.name}}', M.app.name || '');

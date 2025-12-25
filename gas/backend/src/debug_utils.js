@@ -6,6 +6,135 @@
  * - fileId か Drive URL を毎回手入力/引数で渡す
  */
 
+function admin_backfillContactsDerived() {
+  const props = PropertiesService.getScriptProperties();
+  const ssId = props.getProperty('BAS_MASTER_SPREADSHEET_ID');
+  if (!ssId) throw new Error('BAS_MASTER_SPREADSHEET_ID is missing');
+
+  const ss = SpreadsheetApp.openById(ssId);
+  const shC = ss.getSheetByName('contacts');
+  const shS = ss.getSheetByName('submissions');
+  if (!shC) throw new Error('contacts sheet missing');
+  if (!shS) throw new Error('submissions sheet missing');
+
+  const cHeaders = shC.getRange(1, 1, 1, shC.getLastColumn()).getValues()[0].map(String);
+  const sHeaders = shS.getRange(1, 1, 1, shS.getLastColumn()).getValues()[0].map(String);
+
+  const cIdx = (name) => cHeaders.indexOf(name);
+  const sIdx = (name) => sHeaders.indexOf(name);
+
+  // contacts 必須キー
+  const cUserKey = cIdx('user_key');
+  const cLineId = cIdx('line_id');
+  const cIntakeAt = cIdx('intake_at');
+  const cUpdatedAt = cIdx('updated_at');
+
+  // D列（無ければ作って末尾に追加）
+  function ensureContactCol_(name) {
+    let i = cIdx(name);
+    if (i >= 0) return i;
+    shC.getRange(1, shC.getLastColumn() + 1).setValue(name);
+    cHeaders.push(name);
+    return cHeaders.length - 1;
+  }
+  const cFirstSeen = ensureContactCol_('first_seen_at');
+  const cLastSeen = ensureContactCol_('last_seen_at');
+  const cLastForm = ensureContactCol_('last_form');
+  const cLastYM = ensureContactCol_('last_submit_ym');
+
+  // submissions 参照（キーは user_key を優先、無ければ line_id）
+  const sUserKey = sIdx('user_key');
+  const sLineId = sIdx('line_id');
+  const sSubmittedAt = sIdx('submitted_at');
+  const sFormKey = sIdx('form_key');
+
+  if (sSubmittedAt < 0) throw new Error('submissions.submitted_at missing');
+  if (sFormKey < 0) throw new Error('submissions.form_key missing');
+
+  const sLastRow = shS.getLastRow();
+  const subRows =
+    sLastRow >= 2 ? shS.getRange(2, 1, sLastRow - 1, shS.getLastColumn()).getValues() : [];
+
+  // 最新 submission を (user_key or line_id) ごとに集計
+  const latest = new Map(); // key -> { t:Date, formKey:string, ym:string }
+  const toYM = (d) => Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy-MM');
+
+  for (const r of subRows) {
+    const key =
+      (sUserKey >= 0 ? String(r[sUserKey] || '').trim() : '') ||
+      (sLineId >= 0 ? String(r[sLineId] || '').trim() : '');
+    if (!key) continue;
+
+    const dt = new Date(r[sSubmittedAt]);
+    if (isNaN(dt.getTime())) continue;
+
+    const prev = latest.get(key);
+    if (!prev || dt > prev.t) {
+      latest.set(key, {
+        t: dt,
+        formKey: String(r[sFormKey] || '').trim(),
+        ym: toYM(dt),
+      });
+    }
+  }
+
+  // contacts 更新（D列のみ）
+  const cLastRow = shC.getLastRow();
+  if (cLastRow < 2) {
+    Logger.log('[admin_backfillContactsDerived_] contacts has no rows');
+    return;
+  }
+
+  const contactRows = shC.getRange(2, 1, cLastRow - 1, shC.getLastColumn()).getValues();
+
+  // まとめて書くために列配列を作る
+  const colFirst = [];
+  const colLastSeen = [];
+  const colLastForm = [];
+  const colLastYM = [];
+
+  for (const r of contactRows) {
+    const uk = cUserKey >= 0 ? String(r[cUserKey] || '').trim() : '';
+    const lid = cLineId >= 0 ? String(r[cLineId] || '').trim() : '';
+    const key = uk || lid;
+
+    const intakeAt = cIntakeAt >= 0 ? r[cIntakeAt] : '';
+    const updatedAt = cUpdatedAt >= 0 ? r[cUpdatedAt] : '';
+
+    // first_seen_at：空なら intake_at を入れる（無ければ updated_at）
+    const first = r[cFirstSeen];
+    const firstVal = first ? first : intakeAt ? intakeAt : updatedAt ? updatedAt : '';
+
+    const info = key ? latest.get(key) : null;
+
+    // last_seen_at：最新 submission があればそれ、無ければ updated_at
+    const lastSeenVal = info ? info.t : updatedAt ? updatedAt : '';
+
+    // last_form：最新 submission の form_key（空なら空のままでもOK）
+    const lastFormVal = info ? info.formKey || '' : '';
+
+    // last_submit_ym：最新 submission の yyyy-MM（無ければ last_seen_at から作れるなら作る）
+    let ymVal = info ? info.ym || '' : '';
+    if (!ymVal && lastSeenVal) {
+      const d = new Date(lastSeenVal);
+      if (!isNaN(d.getTime())) ymVal = toYM(d);
+    }
+
+    colFirst.push([firstVal]);
+    colLastSeen.push([lastSeenVal]);
+    colLastForm.push([lastFormVal]);
+    colLastYM.push([ymVal]);
+  }
+
+  const startRow = 2;
+  shC.getRange(startRow, cFirstSeen + 1, colFirst.length, 1).setValues(colFirst);
+  shC.getRange(startRow, cLastSeen + 1, colLastSeen.length, 1).setValues(colLastSeen);
+  shC.getRange(startRow, cLastForm + 1, colLastForm.length, 1).setValues(colLastForm);
+  shC.getRange(startRow, cLastYM + 1, colLastYM.length, 1).setValues(colLastYM);
+
+  Logger.log('[admin_backfillContactsDerived_] done. updated=%s', contactRows.length);
+}
+
 /********** 共通ユーティリティ（安全） **********/
 function parseDriveFileId(input) {
   var s = String(input || '').trim();

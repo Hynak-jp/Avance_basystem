@@ -1815,13 +1815,19 @@ function resolveCaseId_(mailPlainBody, subject, lineId) {
 
 function doPost_drive(e) {
   try { Logger.log('[DEPRECATED] doPost_drive called'); } catch (_) {}
-  return ContentService.createTextOutput(
+  const out = ContentService.createTextOutput(
     JSON.stringify({
       ok: false,
+      deprecated: true,
+      code: 410,
       error: 'deprecated',
       hint: 'drive endpoint retired. Use intake/bootstrap flow.',
     })
   ).setMimeType(ContentService.MimeType.JSON);
+  if (typeof out.setStatusCode === 'function') {
+    out.setStatusCode(410);
+  }
+  return out;
 }
 
 function inferDisplayNameFromLedger_(lineId) {

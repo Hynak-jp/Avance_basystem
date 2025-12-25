@@ -220,7 +220,7 @@ staging 吸い上げ
 
 本リリースで導入した「最小セット」の実装要点をまとめます。
 
-- 目的: 初回ログインで `activeCaseId=0001` を払い出し、以降のフォーム送信が自動で同一案件に紐づく。
+- 目的: 初回の `intake_complete` で `activeCaseId` を払い出し、以降のフォーム送信が自動で同一案件に紐づく。
 
 ### 8.1 GAS（WebApp）側
 
@@ -228,10 +228,17 @@ staging 吸い上げ
 - 署名検証: payload=`lineId|caseId|ts` を base64url 署名（p/ts/sig）
 - Script Properties: `BAS_MASTER_SPREADSHEET_ID`, `DRIVE_ROOT_FOLDER_ID`（or `ROOT_FOLDER_ID`）
 - 処理フロー（冪等）:
-  - `contacts` を upsert（コア: `line_id, user_key, active_case_id, intake_at, updated_at`。`display_name` などは任意）
-  - `active_case_id` が未設定なら、`cases` を参照して **ユーザー単位で 4 桁連番を採番**し `contacts.active_case_id` に保存
-  - `cases` の該当行を保証（`draft`）、Drive に `<user_key>-<active_case_id>/` フォルダを保証して `cases.folder_id` を更新
-  - レスポンス例: `{ userKey, activeCaseId, caseKey, folderId }`（実装で必要最小に絞ってOK）
+  - `action=bootstrap`（GET /exec）
+    - 署名検証 → `contacts` を upsert（コア: `line_id, user_key, active_case_id, intake_at, updated_at`。`display_name` などは任意）
+    - 既存の `contacts.active_case_id` を読むだけ（未設定なら空のまま）
+    - **この時点ではケース採番・フォルダ作成はしない**
+    - レスポンス例: `{ ok: true, case_id, caseFolderReady: false }`
+  - `action=intake_complete`（POST /exec）
+    - `active_case_id` が未設定なら `bs_issueCaseId_()` で **cases の最大値+1** を 4 桁採番して保存
+    - `cases` の該当行を保証（`draft` → `intake`）、Drive に `<user_key>-<active_case_id>/` を保証して `cases.folder_id` を更新
+    - `contacts.active_case_id` / `contacts.intake_at` を更新
+    - 可能なら `submissions` に intake を 1 行 upsert（キーは `submission_id + form_key`、`upsertSubmission_` / `submissions_upsert_` を使用）
+    - レスポンス例: `{ ok: true, activeCaseId, caseKey, folderId }`（実装で必要最小に絞ってOK）
 - 旧エンドポイント:
   - `doPost_drive(e)` は **deprecated**（明示的に終了レスポンスを返すだけ）。呼び出し元は持たない想定。
 - JSON 保存拡張:

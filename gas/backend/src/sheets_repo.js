@@ -253,6 +253,9 @@ function upsertSubmission_(row) {
   if (!caseIdRaw || !formKeyRaw || !submissionIdRaw) {
     throw new Error('upsertSubmission_: missing case_id/form_key/submission_id');
   }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(5000);
+  try {
   const normalizedCaseId = normalizeCaseId_(caseIdRaw);
   if (row && typeof normalizeCaseId_ === 'function') {
     row.case_id = normalizeCaseId_(row.case_id || row.caseId || caseIdRaw);
@@ -304,6 +307,21 @@ function upsertSubmission_(row) {
   }
   if (typeof ensureSubmissionsCaseIdTextFormat_ === 'function') {
     try { ensureSubmissionsCaseIdTextFormat_(); } catch (_) {}
+  }
+  try {
+    if (typeof touchContactLastFromSubmission_ === 'function') {
+      const metaLike = Object.assign({}, row);
+      metaLike.meta = metaLike.meta || {};
+      if (!metaLike.meta.case_id) metaLike.meta.case_id = normalized.case_id;
+      if (!metaLike.meta.form_key) metaLike.meta.form_key = normalized.form_key;
+      if (!metaLike.meta.user_key) metaLike.meta.user_key = normalized.user_key;
+      if (!metaLike.meta.line_id) metaLike.meta.line_id = sheetsRepo_getValue_(row, 'line_id') || '';
+      if (!metaLike.meta.submitted_at) metaLike.meta.submitted_at = sheetsRepo_getValue_(row, 'submitted_at') || '';
+      touchContactLastFromSubmission_(metaLike.meta);
+    }
+  } catch (_) {}
+  } finally {
+    try { lock.releaseLock(); } catch (_) {}
   }
 }
 

@@ -450,24 +450,28 @@ function bs_ensureDriveRoot_() {
 }
 
 /** ---------- contacts upsert ---------- **/
+function bs_contactsSchema_() {
+  if (
+    typeof SCHEMA === 'object' &&
+    SCHEMA &&
+    Array.isArray(SCHEMA.contacts) &&
+    SCHEMA.contacts.length
+  ) {
+    return SCHEMA.contacts.slice();
+  }
+  // fallback（最低限）
+  return ['line_id', 'user_key', 'active_case_id', 'intake_at', 'updated_at'];
+}
+
 function bs_upsertContact_(payload) {
   const sh = bs_getSheet_(SHEET_CONTACTS);
   if (sh.getLastRow() < 1) {
-    sh.getRange(1, 1, 1, 7).setValues([
-      ['user_key', 'line_id', 'display_name', 'email', 'active_case_id', 'updated_at', 'intake_at'],
-    ]);
+    const headers = bs_contactsSchema_();
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
   }
   let headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
   const idx = bs_toIndexMap_(headers);
-  const required = [
-    'user_key',
-    'line_id',
-    'display_name',
-    'email',
-    'active_case_id',
-    'updated_at',
-    'intake_at',
-  ];
+  const required = bs_contactsSchema_();
   let changed = false;
   required.forEach(function (key) {
     if (!(key in idx)) {
@@ -903,23 +907,18 @@ function bs_collectIntakeFromStaging_(lineId, caseId, knownFolderId /* optional 
                     data.submission_id || (data.meta && data.meta.submission_id) || ''
                   ).trim();
                 }
-                if (
-                  typeof submissions_hasRow_ === 'function' &&
-                  typeof submissions_appendRow === 'function'
-                ) {
-                  if (!submissions_hasRow_(sid, 'intake')) {
-                    submissions_appendRow({
-                      submission_id: sid || String(Date.now()),
-                      form_key: 'intake',
-                      case_id: normalizedCaseId,
-                      user_key: drive_userKeyFromLineId_(lineId),
-                      line_id: lineId,
-                      submitted_at: new Date().toISOString(),
-                      referrer: lastSavedName || file.getName(),
-                      status: 'received',
-                    });
-                    try { appended++; } catch (_) {}
-                  }
+                if (typeof submissions_upsert_ === 'function') {
+                  submissions_upsert_({
+                    submission_id: sid || String(Date.now()),
+                    form_key: 'intake',
+                    case_id: normalizedCaseId,
+                    user_key: drive_userKeyFromLineId_(lineId),
+                    line_id: lineId,
+                    submitted_at: new Date().toISOString(),
+                    referrer: lastSavedName || file.getName(),
+                    status: 'received',
+                  });
+                  try { appended++; } catch (_) {}
                 }
                 // 旧API互換（最小限・最後の手段）
                 else if (typeof recordSubmission_ === 'function') {
@@ -1008,12 +1007,8 @@ function bs_collectIntakeFromStaging_(lineId, caseId, knownFolderId /* optional 
             try { caseFolder.createFile(Utilities.newBlob(outU, 'application/json', newNameU)); } catch (_) {}
             try { candidates[0].f.setTrashed(true); } catch (_) {}
             moved++;
-            if (
-              typeof submissions_hasRow_ === 'function' &&
-              typeof submissions_appendRow === 'function' &&
-              !submissions_hasRow_(sidU, 'intake')
-            ) {
-              submissions_appendRow({
+            if (typeof submissions_upsert_ === 'function') {
+              submissions_upsert_({
                 submission_id: sidU,
                 form_key: 'intake',
                 case_id: normalizedCaseId,
@@ -1294,14 +1289,10 @@ function doPost(e) {
               Utilities.newBlob(jsonStr, 'application/json', jsonName)
             );
           } catch (_) {}
-          // submissions 追記（重複ガード付き）
+          // submissions 追記
           try {
-            if (
-              typeof submissions_hasRow_ === 'function' &&
-              typeof submissions_appendRow === 'function' &&
-              !submissions_hasRow_(submissionId, 'intake')
-            ) {
-              submissions_appendRow({
+            if (typeof submissions_upsert_ === 'function') {
+              submissions_upsert_({
                 submission_id: String(submissionId),
                 form_key: 'intake',
                 case_id: cid,

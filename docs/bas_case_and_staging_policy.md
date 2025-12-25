@@ -49,8 +49,8 @@
      - `case_id`（文字列）/ `case_key` / `folder_id` / `status='intake'` / `updated_at` ほか
 6. **staging 吸い上げ**（すぐ下の §4 の実装を **knownFolderId** 付きで呼ぶ）
 7. **submissions 追記**
-   - **列名マッピングAPI**で `submissions_appendRow()` を使用
-   - 先に `submissions_hasRow_(submission_id,'intake')` で重複ガード
+   - **列名マッピングAPI**で `upsertSubmission_`（またはラッパーの `submissions_upsert_`）を使用
+   - `submission_id + form_key` をキーに upsert（重複ガード兼更新）
    - `case_id` 列は列単位で `@` 固定、`form_key='intake'`、`referrer` はファイル名
 
 > ポイント: intake 完了直後は **knownFolderId** を渡して吸い上げを実行することで、初回から確実に移送・起票まで終わらせる。
@@ -86,7 +86,7 @@ function matchesTarget(json, { ukey, cid, ckey, lid }) {
 2. staging を列挙し、`intake__*.json` を対象に **4.1 の優先順位**で一致判定。
 3. 一致したファイルを**案件フォルダへ移送**（作成済フォルダのみ）。
 4. `submission_id` は **ファイル名 → JSON → Date.now()** の順で補完し、最終的に半角数字へ正規化（不正フォーマットはその場で再採番）。
-5. `submissions` に **列名マッピング＋重複ガード**で1行追記。`cases_forms` を `intake: received` に upsert（任意）。
+5. `submissions` に **列名マッピング＋upsert**で1行追記。`cases_forms` を `intake: received` に upsert（任意）。
 6. **計測ログ**: `moved`, `appended` 件数を出す。
 
 ### 4.3 限定フェイルセーフ
@@ -98,8 +98,8 @@ function matchesTarget(json, { ukey, cid, ckey, lid }) {
 
 ## 5. スプレッドシート・スキーマ/書式
 - `contacts.active_case_id` / `cases.case_id` / `submissions.case_id` は **列単位で `@` 書式**に固定。
-- `submissions` 必須列: `submission_id`, `form_key`, `case_id`（不足時は **append をスキップ**しログを出す）。`submission_id` は保存時に半角数字へ正規化され、Gmail 取込ログシート（submission_logs）とは区別して管理する。ACK 用の `ack:<caseId>:<formKey>` 行は本体行が入ったタイミングで自動削除し、スイープユーティリティでも残す。
-- 旧API（配列 index で `setValues`）は廃止。**列名ベース**関数 `submissions_appendRow` のみ使用。
+- `submissions` 必須列: `submission_id`, `form_key`, `case_id`（不足時は **upsert をスキップ**しログを出す）。`submission_id` は保存時に半角数字へ正規化され、Gmail 取込ログシート（submission_logs）とは区別して管理する。ACK 用の `ack:<caseId>:<formKey>` 行は本体行が入ったタイミングで自動削除し、スイープユーティリティでも残す。
+- 旧API（配列 index で `setValues`）は廃止。**列名ベースの upsert**（`upsertSubmission_` / `submissions_upsert_`）のみ使用。
 
 ---
 
@@ -138,3 +138,54 @@ function matchesTarget(json, { ukey, cid, ckey, lid }) {
 - 署名 ts スキュー境界（±600秒）で許可/拒否の切り替えを確認。
 - submissions シートに非数値の `submission_id` 行が残らない（`sheetsRepo_sweepSubmissions_` で掃除可能）。
 - `getCaseForms_` 未ロードでも `forms: []` で返る。
+
+---
+
+## 10. Apps Script 側の退役確認（doPost_drive）
+目的: 旧エンドポイントが誤って生きていないかをデプロイ前に確認する。
+
+### 10.1 ローカル（repo）での確認
+```bash
+cd ~/dev/Avance_basystem/gas/backend
+git grep -n "function doPost_drive" src/Gドライブ整理_BAS提出物.js
+git grep -n "function doPost_drive" src || true
+git grep -n "action=drive" src || true
+git grep -n "allocateNextCaseId_" src || true
+```
+期待: doPost_drive は deprecated JSON だけ、action=drive / allocateNextCaseId_ はゼロ件。
+
+### 10.2 Apps Script プロジェクトでの確認
+1. GAS エディタで `doPost_drive` を検索。
+2. 返却が以下と一致していることを確認:
+   - `ok:false`
+   - `deprecated:true`
+   - `code:410`
+   - `hint: drive endpoint retired...`
+3. 旧ロジック（署名検証、採番、case 作成）が残っていないことを確認。
+
+### 10.3 デプロイ確認
+1. デプロイ済み WebApp の URL を確認。
+2. 利用元（メモ/設定/フォーム）の参照を確認。
+3. 実行ログで `"[DEPRECATED] doPost_drive called"` が出ていないか監視。
+
+### 10.3.1 実行ログの監視（2系統）
+1. Apps Script ダッシュボード（Executions/実行）で確認
+   - 直近の実行に `doPost_drive` 相当の呼び出しが無いこと
+   - ある場合は呼び出し元（URL/設定/メモ）を特定して除去
+2. Cloud Logging で確認（Web実行ログ）
+   - Logs Explorer で `script.googleapis.com/console_logs` を対象に検索
+   - 検索キーワード例: `"[DEPRECATED] doPost_drive called"`
+   - 一定期間（例: 14日/30日）ゼロなら「完全削除」判断の材料にする
+
+### 10.3.2 デプロイ運用（clasp / 固定デプロイID）
+- `gas/backend` で実行
+  - `npx clasp push`
+  - `npx clasp deploy`
+- デプロイ後の WebApp `/exec` URL を控え、利用側（formlist等）の `GAS_ENDPOINT` を確実に更新する
+- 事故防止:
+  - Webアプリは 1 本のデプロイIDに固定（新規デプロイを増やさない）
+  - `doPost` はプロジェクト内で 1 個だけ（他は `doPost_xxx` に寄せる）
+
+### 10.4 退役判断
+- **一定期間ログがゼロ**なら doPost_drive を完全削除する判断材料になる。
+- まだ呼ばれる場合は **deprecated JSON のまま温存**し、呼び出し元を順次除去。

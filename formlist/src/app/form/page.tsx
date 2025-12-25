@@ -25,6 +25,7 @@ type FormDef = {
   baseUrl: string;
   formKey?: string;
   storeKey?: string;
+  hidden?: boolean;
 };
 async function loadForms(): Promise<{ forms: FormDef[] }> {
   const forms: FormDef[] = [
@@ -51,6 +52,7 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
       baseUrl: 'https://business.form-mailer.jp/fms/5e2a5d6a315397',
       formKey: 's2005_creditors',
       storeKey: 's2005_creditors',
+      hidden: true, // 当面は一覧に出さない（6フォーム運用）
     },
     {
       formId: '314004',
@@ -59,10 +61,11 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
       baseUrl: 'https://business.form-mailer.jp/fms/4b27d644314004',
       formKey: 's2006_creditors_public',
       storeKey: 's2006_creditors_public',
+      hidden: true, // 当面は一覧に出さない（6フォーム運用）
     },
     {
       formId: '309542',
-      title: 'S2010 陳述書提出フォーム(1/3)',
+      title: 'S2010 陳述書提出フォーム(1/2)',
       description: '経歴等を記入します',
       baseUrl: 'https://business.form-mailer.jp/fms/dde2787c309542',
       formKey: 's2010_p1_career',
@@ -70,19 +73,11 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
     },
     {
       formId: '308949',
-      title: 'S2010 陳述書提出フォーム(2/3)',
+      title: 'S2010 陳述書提出フォーム(2/2)',
       description: '破産申立てに至った事情を記入します',
       baseUrl: 'https://business.form-mailer.jp/fms/f16a6fa1308949',
       formKey: 's2010_p2_cause',
       storeKey: 's2010_p2_cause',
-    },
-    {
-      formId: '310055',
-      title: 'S2010 陳述書提出フォーム(3/3)',
-      description: '免責不許可事由に関する報告を記入します',
-      baseUrl: 'https://business.form-mailer.jp/fms/3bbcb828310055',
-      formKey: 's2010_p3_discharge',
-      storeKey: 's2010_p3_discharge',
     },
     {
       formId: '315503',
@@ -101,15 +96,17 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
       storeKey: 's2011_income_m1',
     },
     {
-      formId: '307065',
+      formId: '325669',
       title: '書類提出フォーム',
       description: '給与明細などの書類をアップロードします',
-      baseUrl: 'https://business.form-mailer.jp/fms/dummy-url-3',
-      formKey: 'supporting_documents',
-      storeKey: 'supporting_documents',
+      baseUrl: 'https://business.form-mailer.jp/fms/829affd7325669',
+      formKey: 'supporting_documents_payslip_m1',
+      storeKey: 'supporting_documents_payslip_m1',
+      hidden: true, // 当面は一覧に出さない（6フォーム運用）
     },
   ];
-  return { forms };
+  const visibleForms = forms.filter((form) => !form.hidden);
+  return { forms: visibleForms };
 }
 
 // 署名付きの /api/status を信頼し、GAS直叩きのフォールバックは行わない
@@ -228,7 +225,7 @@ export default async function FormPage() {
     redirectUrl.searchParams.set('bust', tsSec());
     if (isIntakeForm) redirectUrl.searchParams.set('form', 'intake');
     const redirectForForm = redirectUrl.toString();
-    const allowPrefill = f.formKey === 's2002_userform' || f.formKey === 's2005_creditors';
+    const allowPrefill = f.formKey === 's2002_userform';
     const extraPrefill =
       f.formKey === 's2002_userform' && userEmail
         ? {
@@ -256,7 +253,6 @@ export default async function FormPage() {
           redirectUrl: redirectForForm,
           formId: f.formId,
           formKey: f.formKey,
-          // NOTE: S2005 は allowlist でも実際に渡すのは case_id のみ（email / seq は意図的に未付与）
           prefill: allowPrefill,
           extraPrefill,
           lineIdQueryKeys: [],

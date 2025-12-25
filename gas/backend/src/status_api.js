@@ -366,132 +366,213 @@ function statusApi_addCamelMirrors_(obj) {
   return out;
 }
 
-// ===== submissions 追記ユーティリティ（列名ベース、snake/camel 両対応） =====
-function submissions_headerIndexMap_(headers) {
-  var m = {};
-  (headers || []).forEach(function (h, i) {
-    var s = String(h == null ? '' : h);
-    m[s] = i; // そのまま
-    // camel <-> snake 双方向キーをざっくり登録
-    var camel = s.replace(/_([a-z])/g, function (_, c) { return (c || '').toUpperCase(); });
-    m[camel] = i;
-    var snake = s.replace(/([A-Z])/g, '_$1').toLowerCase();
-    m[snake] = i;
-  });
-  return m;
+function submissions_upsert_(payload) {
+  try {
+    if (typeof upsertSubmission_ === 'function') {
+      upsertSubmission_(payload);
+      try {
+        var meta = payload && typeof payload === 'object' ? (payload.meta || payload) : {};
+        touchContactLastFromSubmission_(meta);
+      } catch (_) {}
+      return true;
+    }
+    try { Logger.log('[submissions] upsertSubmission_ is not available'); } catch (_) {}
+  } catch (err) {
+    try { Logger.log('[submissions] upsert failed: %s', (err && err.stack) || err); } catch (_) {}
+  }
+  return false;
 }
 
-function submissions_appendRow(obj) {
-  var props = PropertiesService.getScriptProperties();
-  var sid = props.getProperty('BAS_MASTER_SPREADSHEET_ID') || props.getProperty('SHEET_ID');
-  if (!sid) throw new Error('submissions_appendRow: missing BAS_MASTER_SPREADSHEET_ID');
-  var ss = SpreadsheetApp.openById(sid);
-  var sh = ss.getSheetByName('submissions');
-  if (!sh) sh = ss.insertSheet('submissions');
-  if (sh.getLastRow() < 1) {
-    sh.getRange(1, 1, 1, 10).setValues([[
-      'submission_id','form_key','case_id','user_key','line_id',
-      'submitted_at','seq','referrer','redirect_url','status'
-    ]]);
-  }
-
-  var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
-  var idx = submissions_headerIndexMap_(headers);
-
-  if (!submissions_requireHeadersOrWarn_(idx)) {
-    try { Logger.log('[submissions] append skipped (please add headers: submission_id, form_key, case_id)'); } catch (_) {}
-    return;
-  }
-
-  var meta = obj && typeof obj.meta === 'object' ? obj.meta : {};
-  var rawLineId = obj.line_id || meta.line_id || '';
-  var lineId = String(rawLineId || '').trim();
-  var inferredUserKey = '';
+function hashEmail_(email) {
   try {
-    if (!obj.user_key && !meta.user_key && lineId && typeof drive_userKeyFromLineId_ === 'function') {
-      inferredUserKey = drive_userKeyFromLineId_(lineId) || '';
-    }
-  } catch (_) {}
-  var userKey = normalizeUserKey_(obj.user_key || meta.user_key || inferredUserKey || '');
-  var caseId = normalizeCaseId_(obj.case_id || meta.case_id || '');
-  var caseKey = obj.case_key || meta.case_key || (userKey && caseId ? userKey + '-' + caseId : '');
-  if (meta) {
-    if (lineId && !meta.line_id) meta.line_id = lineId;
-    meta.user_key = userKey;
-    meta.case_id = caseId;
-    if (caseKey) meta.case_key = caseKey;
-    obj.meta = meta;
+    const raw = Utilities.computeDigest(
+      Utilities.DigestAlgorithm.SHA_256,
+      String(email || '').trim().toLowerCase(),
+      Utilities.Charset.UTF_8
+    );
+    return raw
+      .map(function (b) {
+        const v = (b + 256) % 256;
+        return (v < 16 ? '0' : '') + v.toString(16);
+      })
+      .join('');
+  } catch (_) {
+    return '';
   }
+}
 
-  var row = new Array(headers.length).fill('');
-  var payload = {
-    submission_id: obj.submission_id || '',
-    form_key: obj.form_key || '',
-    case_id: caseId,
-    user_key: userKey,
-    line_id: lineId,
-    submitted_at: obj.submitted_at || new Date().toISOString(),
-    seq: obj.seq || '',
-    referrer: obj.referrer || '',
-    redirect_url: obj.redirect_url || '',
-    status: obj.status || 'received',
-    case_key: caseKey,
-    json_path: obj.json_path || '',
+function extractEmailFromMeta_(meta) {
+  if (!meta || typeof meta !== 'object') return '';
+  const candidates = [];
+  const pick = function (v) {
+    if (v && typeof v === 'string') {
+      const s = String(v).trim();
+      if (s) candidates.push(s);
+    }
   };
+  pick(meta.email);
+  pick(meta.contact_email);
+  pick(meta.user_email);
+  pick(meta.mail);
+  pick(meta['メールアドレス']);
+  if (meta.fields && typeof meta.fields === 'object') {
+    ['email', 'mail', 'メールアドレス'].forEach(function (k) {
+      pick(meta.fields[k]);
+    });
+  }
+  return candidates.length ? candidates[0] : '';
+}
 
-  Object.keys(payload).forEach(function (k) {
-    if (idx[k] != null) row[idx[k]] = payload[k];
-  });
+function touchContactLastFromSubmission_(meta) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(2000)) {
+    try { Logger.log('[contacts:last] lock busy'); } catch (_) {}
+    return false;
+  }
+  try {
+    const m = meta && typeof meta === 'object' ? meta : {};
+    const userKey = normalizeUserKey_(m.user_key || m.userKey || '');
+    const lineId = String(m.line_id || m.lineId || '').trim();
+    if (!userKey && !lineId) return false;
 
-  var targetRow = sh.getLastRow() + 1;
-  sh.getRange(targetRow, 1, 1, row.length).setValues([row]);
-  if (idx.case_id != null) {
-    // 列全体をテキスト書式（初期化的に一度かけても害はない）
-    sh.getRange(1, idx.case_id + 1, sh.getMaxRows(), 1).setNumberFormat('@');
+    const formKey = String(m.form_key || m.formKey || '').trim();
+    const submittedRaw =
+      m.submitted_at ||
+      m.submittedAt ||
+      m.received_at ||
+      m.receivedAt ||
+      m.timestamp ||
+      '';
+    const submittedAt = submittedRaw ? new Date(submittedRaw) : new Date();
+    const submittedValid = isNaN(submittedAt.getTime()) ? new Date() : submittedAt;
+    const ym = Utilities.formatDate(submittedValid, 'Asia/Tokyo', 'yyyy-MM');
+
+    const props = PropertiesService.getScriptProperties();
+    const sid =
+      props.getProperty('BAS_MASTER_SPREADSHEET_ID') ||
+      props.getProperty('SHEET_ID') ||
+      '';
+    if (!sid) return false;
+    const ss = SpreadsheetApp.openById(sid);
+    const sh = ss.getSheetByName('contacts');
+    if (!sh) return false;
+
+    const displayName =
+      (m.display_name || m.displayName || m.line_display_name || m.lineName || '').toString().trim();
+    const emailCandidate = extractEmailFromMeta_(m);
+    const noteCandidate = (m.note || m.notes || '').toString().trim();
+
+    const header = sh
+      .getRange(1, 1, 1, Math.max(1, sh.getLastColumn()))
+      .getValues()[0]
+      .map(function (v) {
+        return String(v || '').trim();
+      });
+    const idx =
+      typeof bs_toIndexMap_ === 'function'
+        ? bs_toIndexMap_(header)
+        : header.reduce(function (m2, v, i) {
+            const key = String(v || '').trim();
+            if (key && m2[key] === undefined) m2[key] = i;
+            return m2;
+          }, {});
+
+    const pendingAdd = [];
+    const ensureCol = function (name, want) {
+      if (typeof idx[name] === 'number') return idx[name];
+      if (!want) return -1;
+      pendingAdd.push(name);
+      idx[name] = header.length + pendingAdd.length - 1;
+      return idx[name];
+    };
+
+    const colUserKey = typeof idx['user_key'] === 'number' ? idx['user_key'] : -1;
+    const colLineId = typeof idx['line_id'] === 'number' ? idx['line_id'] : -1;
+    const colIntakeAt = typeof idx['intake_at'] === 'number' ? idx['intake_at'] : -1;
+    const colFirstSeen = ensureCol('first_seen_at', true);
+    const colLastSeen = ensureCol('last_seen_at', true);
+    const colLastForm = ensureCol('last_form', true);
+    const colLastYM = ensureCol('last_submit_ym', true);
+    const colDisplay = ensureCol('display_name', !!displayName);
+    const colEmail = ensureCol('email', !!emailCandidate);
+    const colEmailHash = ensureCol('email_hash', !!emailCandidate);
+    const colNotes = ensureCol('notes', !!noteCandidate);
+
+    if (pendingAdd.length) {
+      Array.prototype.push.apply(header, pendingAdd);
+      sh.getRange(1, 1, 1, header.length).setValues([header]);
+    }
+
+    const lastRow = sh.getLastRow();
+    if (lastRow < 2) return false;
+    const rows = sh.getRange(2, 1, lastRow - 1, header.length).getValues();
+
+    let target = -1;
+    if (colUserKey >= 0 && userKey) {
+      for (let i = 0; i < rows.length; i++) {
+        if (String(rows[i][colUserKey] || '').trim() === userKey) {
+          target = i;
+          break;
+        }
+      }
+    }
+    if (target < 0 && colLineId >= 0 && lineId) {
+      for (let i = 0; i < rows.length; i++) {
+        if (String(rows[i][colLineId] || '').trim() === lineId) {
+          target = i;
+          break;
+        }
+      }
+    }
+    if (target < 0) return false;
+
+    const row = rows[target];
+    while (row.length < header.length) row.push('');
+    if (colFirstSeen >= 0 && !row[colFirstSeen]) {
+      const intakeVal = colIntakeAt >= 0 ? row[colIntakeAt] : '';
+      const toDate = function (v) {
+        if (!v) return null;
+        if (Object.prototype.toString.call(v) === '[object Date]') {
+          return isNaN(v.getTime()) ? null : v;
+        }
+        const d = new Date(v);
+        return isNaN(d.getTime()) ? null : d;
+      };
+      const intakeDate = toDate(intakeVal);
+      row[colFirstSeen] = intakeDate || submittedValid;
+    }
+    if (colLastSeen >= 0) row[colLastSeen] = submittedValid;
+    if (colLastForm >= 0 && formKey) row[colLastForm] = formKey;
+    if (colLastYM >= 0) row[colLastYM] = ym;
+
+    if (colDisplay >= 0 && !String(row[colDisplay] || '').trim() && displayName) {
+      row[colDisplay] = displayName;
+    }
+
+    if (colEmail >= 0 && !String(row[colEmail] || '').trim() && emailCandidate) {
+      row[colEmail] = emailCandidate;
+      if (colEmailHash >= 0) row[colEmailHash] = hashEmail_(emailCandidate);
+    } else if (colEmailHash >= 0 && !String(row[colEmailHash] || '').trim() && emailCandidate) {
+      row[colEmailHash] = hashEmail_(emailCandidate);
+    }
+
+    if (colNotes >= 0 && !String(row[colNotes] || '').trim() && noteCandidate) {
+      row[colNotes] = noteCandidate;
+    }
+
+    sh.getRange(target + 2, 1, 1, header.length).setValues([row]);
+    return true;
+  } catch (err) {
+    try { Logger.log('[contacts:last] update failed: %s', (err && err.stack) || err); } catch (_) {}
+    return false;
+  } finally {
+    try { lock.releaseLock(); } catch (_) {}
   }
 }
 
 function extractSubmissionId_(name) {
   var m = String(name || '').match(/__(\d+)\.json$/);
   return m ? m[1] : '';
-}
-
-function submissions_requireHeadersOrWarn_(idx) {
-  try {
-    var must = ['submission_id', 'form_key', 'case_id'];
-    var miss = must.filter(function (k) { return idx[k] == null; });
-    if (miss.length) Logger.log('[submissions] missing headers: ' + miss.join(','));
-    return miss.length === 0;
-  } catch (_) {
-    return true;
-  }
-}
-
-function submissions_hasRow_(submissionId, formKey) {
-  try {
-    var props = PropertiesService.getScriptProperties();
-    var sid = props.getProperty('BAS_MASTER_SPREADSHEET_ID') || props.getProperty('SHEET_ID');
-    if (!sid) return false;
-    var ss = SpreadsheetApp.openById(sid);
-    var sh = ss.getSheetByName('submissions');
-    if (!sh) return false;
-    var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
-    var colCount = headers.length; // ヘッダの実列数に合わせる（右端のゴミ列を無視）
-    var idx = submissions_headerIndexMap_(headers);
-    if (!submissions_requireHeadersOrWarn_(idx)) return false;
-    var rc = sh.getLastRow() - 1;
-    if (rc < 1) return false;
-    var range = sh.getRange(2, 1, rc, colCount).getValues();
-    var cSub = idx['submission_id'];
-    var cForm = idx['form_key'];
-    if (cSub == null || cForm == null) return false;
-    for (var i = 0; i < range.length; i++) {
-      var sidv = String(range[i][cSub] || '').trim();
-      var fkv = String(range[i][cForm] || '').trim();
-      if (sidv && fkv && sidv === String(submissionId) && fkv === String(formKey)) return true;
-    }
-  } catch (_) {}
-  return false;
 }
 
 // ===== V2 署名サポート（base64url） =====
@@ -621,25 +702,23 @@ function statusApi_collectStaging_(lineId, caseId) {
             try { foundMove.file.setTrashed(true); } catch (_) {}
             try { moved++; } catch (_) {}
           } catch (_) {}
-          // submissions 補填（重複ガード）
+          // submissions 補填（upsert）
           try {
             var subIdMv = extractSubmissionId_(foundMove.name);
-            if (subIdMv && typeof submissions_hasRow_ === 'function' && typeof submissions_appendRow === 'function') {
-              if (!submissions_hasRow_(subIdMv, 'intake')) {
-                submissions_appendRow({
-                  submission_id: subIdMv,
-                  form_key: 'intake',
-                  case_id: cid,
-                  user_key: uk,
-                  line_id: lid,
-                  submitted_at: new Date().toISOString(),
-                  status: 'received',
-                  seq: '',
-                  referrer: foundMove && foundMove.name || '',
-                  redirect_url: '',
-                });
-                try { appended++; } catch (_) {}
-              }
+            if (subIdMv && typeof submissions_upsert_ === 'function') {
+              const ok = submissions_upsert_({
+                submission_id: subIdMv,
+                form_key: 'intake',
+                case_id: cid,
+                user_key: uk,
+                line_id: lid,
+                submitted_at: new Date().toISOString(),
+                status: 'received',
+                seq: '',
+                referrer: (foundMove && foundMove.name) || '',
+                redirect_url: '',
+              });
+              if (ok) { try { appended++; } catch (_) {} }
             }
           } catch (_) {}
         }
@@ -723,14 +802,14 @@ function statusApi_collectStaging_(lineId, caseId) {
               try { foundForThis.file.setTrashed(true); } catch (_) {}
             } catch (_) {}
             try { moved++; } catch (_) {}
-            // submissions upsert（重複ガード）
+            // submissions upsert（重複は上書き）
             try {
             var nm2 = foundForThis.name;
             var subId = nm2 ? extractSubmissionId_(nm2) : '';
-            if (subId && typeof upsertSubmission_ === 'function') {
+            if (subId && typeof submissions_upsert_ === 'function') {
               var ensuredCid = (ensureKey.match(/-(\d{4})$/) || [])[1] || cid;
               var normEnsuredCid = statusApi_normCaseId_(ensuredCid);
-              upsertSubmission_({
+              const ok = submissions_upsert_({
                 submission_id: subId,
                 form_key: 'intake',
                 case_id: normEnsuredCid,
@@ -741,7 +820,7 @@ function statusApi_collectStaging_(lineId, caseId) {
                 referrer: nm2 || '',
                 redirect_url: '',
               });
-              try { appended++; } catch (_) {}
+              if (ok) { try { appended++; } catch (_) {} }
             }
             } catch (_) {}
             // 限定ensureによりフォルダを起こした直後に、contacts/cases も揃える
@@ -826,11 +905,11 @@ function statusApi_collectStaging_(lineId, caseId) {
           var nm = f.getName && f.getName();
           if (!nm || !/^intake__/i.test(nm)) continue;
           var subId = extractSubmissionId_(nm);
-          if (subId && typeof upsertSubmission_ === 'function') {
+          if (subId && typeof submissions_upsert_ === 'function') {
             var normCid3 = statusApi_normCaseId_(cid);
             var nextSeq3 = 1;
             try { nextSeq3 = (getLastSeq_(normCid3, 'intake') | 0) + 1; } catch (_) { nextSeq3 = 1; }
-            upsertSubmission_({
+            const ok = submissions_upsert_({
               submission_id: subId,
               form_key: 'intake',
               case_id: normCid3,
@@ -842,7 +921,7 @@ function statusApi_collectStaging_(lineId, caseId) {
               referrer: nm,
               redirect_url: '',
             });
-            try { appended++; } catch (_) {}
+            if (ok) { try { appended++; } catch (_) {} }
           }
         }
       } catch (_) {}
@@ -961,25 +1040,20 @@ function statusApi_collectStaging_(lineId, caseId) {
                 );
                 try { newest.setTrashed(true); } catch (_) {}
                 moved++;
-                if (
-                  typeof submissions_hasRow_ === 'function' &&
-                  typeof submissions_appendRow === 'function'
-                ) {
-                  if (!submissions_hasRow_(subIdFS, 'intake')) {
-                    submissions_appendRow({
-                      submission_id: subIdFS,
-                      form_key: 'intake',
-                      case_id: cid4,
-                      user_key: ukeyFS,
-                      line_id: lid,
-                      submitted_at: new Date().toISOString(),
-                      status: 'received',
-                      seq: '',
-                      referrer: jsonNameFS,
-                      redirect_url: '',
-                    });
-                    appended++;
-                  }
+                if (typeof submissions_upsert_ === 'function') {
+                  const ok = submissions_upsert_({
+                    submission_id: subIdFS,
+                    form_key: 'intake',
+                    case_id: cid4,
+                    user_key: ukeyFS,
+                    line_id: lid,
+                    submitted_at: new Date().toISOString(),
+                    status: 'received',
+                    seq: '',
+                    referrer: jsonNameFS,
+                    redirect_url: '',
+                  });
+                  if (ok) appended++;
                 }
               } catch (_) {}
             }

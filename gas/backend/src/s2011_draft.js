@@ -190,15 +190,14 @@ function ensureS2011DraftSheet_(caseId, prev) {
       : caseFolder;
   const props = PropertiesService.getScriptProperties();
   const tplIdTrimmed = String(
-    (props && props.getProperty('S2011_TEMPLATE_GSHEET_ID')) || ''
+    (props && props.getProperty('S2011_TEMPLATE_GSHEET_ID')) ||
+      (props && props.getProperty('S2011_TEMPLATE_SSID')) ||
+      ''
   ).trim();
   if (tplIdTrimmed) {
     const ssId = DriveApp.getFileById(tplIdTrimmed)
       .makeCopy(`S2011_家計収支_${caseId}`, draftsFolder)
       .getId();
-    try {
-      DriveApp.getFileById(ssId).moveTo(caseFolder);
-    } catch (_) {}
     return { sheet_id: ssId, doc_id: ssId };
   }
   throw new Error('S2011_TEMPLATE_GSHEET_ID 未設定。テンプレからのコピーに失敗しました。');
@@ -1084,6 +1083,7 @@ function run_RebuildS2011DraftFromCaseJson(caseId, submissionId, formKey, overwr
 
   const caseFolder = findCaseFolder_(rootId, caseId);
   if (!caseFolder) throw new Error('ケースフォルダが見つかりません: ' + caseId);
+  const draftsFolder = getOrCreateSubfolder_(caseFolder, 'drafts');
 
   const jsonName = formKey + '__' + submissionId + '.json';
   const jsonFile = findFileInFolderByName_(caseFolder, jsonName);
@@ -1102,7 +1102,9 @@ function run_RebuildS2011DraftFromCaseJson(caseId, submissionId, formKey, overwr
 
   // 既存ドラフトがあれば処理方針に従う
   const draftName = 'S2011_' + caseId + '_draft_' + submissionId;
-  const existingDraft = findFileInFolderByName_(caseFolder, draftName);
+  const existingDraft =
+    findFileInFolderByName_(draftsFolder, draftName) ||
+    findFileInFolderByName_(caseFolder, draftName);
   if (existingDraft) {
     if (overwrite) {
       existingDraft.setTrashed(true); // ごみ箱へ（完全削除はしない）
@@ -1132,8 +1134,8 @@ function run_RebuildS2011DraftFromCaseJson(caseId, submissionId, formKey, overwr
   const draft = template.copy(draftName);
   renderS2011DraftSheet_(draft.getId(), agg);
 
-  // ケースフォルダ直下へ移動（テンプレのコピーは My Drive 直下にできるため）
-  DriveApp.getFileById(draft.getId()).moveTo(caseFolder);
+  // テンプレのコピーは My Drive 直下にできるため、drafts へ移動
+  DriveApp.getFileById(draft.getId()).moveTo(draftsFolder);
 
   // agg を保存（シートIDと共に）
   const mergedAgg = Object.assign(loadAggIfAny_(caseFolder), agg, {

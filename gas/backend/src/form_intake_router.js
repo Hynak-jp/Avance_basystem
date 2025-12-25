@@ -321,28 +321,26 @@ if (typeof tryMoveIntakeToCase_ !== 'function') {
       try { file && file.setTrashed && file.setTrashed(true); } catch(_){}
       try { Logger.log('[router.move] moved name=%s by=%s → folder=%s', fileName || '', res.by || '', (caseFolder && caseFolder.getName && caseFolder.getName()) || ''); } catch(_){}
 
-      // submissions 追記（重複ガード）
+      // submissions 追記
       try {
         var sid = (obj && obj.meta && obj.meta.submission_id) || ((String(fileName || '').match(/^intake__(\d+)\.json$/i) || [])[1] || '');
         if (!sid) { try { var m2 = String(fileName || '').match(/__(\d+)\.json$/); if (m2) sid = m2[1]; } catch(_){}
         }
         if (!sid) sid = String(Date.now());
-        if (typeof submissions_hasRow_ === 'function' && typeof submissions_appendRow === 'function') {
-          if (!submissions_hasRow_(sid, 'intake')) {
-            submissions_appendRow({
-              submission_id: sid,
-              form_key: 'intake',
-              case_id: cid,
-              user_key: uk,
-              line_id: lid,
-              submitted_at: (obj && obj.meta && obj.meta.submitted_at) || new Date().toISOString(),
-              status: 'intake',
-              // 拡張カラム
-              seq: (obj && obj.meta && obj.meta.seq) || '',
-              referrer: (obj && obj.meta && obj.meta.referrer) || '',
-              redirect_url: (obj && obj.meta && obj.meta.redirect_url) || ''
-            });
-          }
+        if (typeof submissions_upsert_ === 'function') {
+          submissions_upsert_({
+            submission_id: sid,
+            form_key: 'intake',
+            case_id: cid,
+            user_key: uk,
+            line_id: lid,
+            submitted_at: (obj && obj.meta && obj.meta.submitted_at) || new Date().toISOString(),
+            status: 'intake',
+            // 拡張カラム
+            seq: (obj && obj.meta && obj.meta.seq) || '',
+            referrer: (obj && obj.meta && obj.meta.referrer) || '',
+            redirect_url: (obj && obj.meta && obj.meta.redirect_url) || ''
+          });
         }
       } catch (_) {}
       return true;
@@ -398,6 +396,27 @@ const FORM_INTAKE_REGISTRY = {
     },
     caseResolver: resolveCaseByCaseIdSmart_,
     statusAfterSave: 'intake',
+    requireCaseId: true,
+    afterSave: function () {
+      return {};
+    },
+  },
+  s2010_p1_intake: {
+    name: 'S2010 Part1(経歴等)',
+    queueLabel: 'BAS/S2010P1/Queue',
+    parser: function (subject, body) {
+      if (typeof parseFormMail_S2010_P1_ !== 'function') {
+        throw new Error('parseFormMail_S2010_P1_ is not defined');
+      }
+      const parsed = parseFormMail_S2010_P1_(subject, body);
+      if (parsed && parsed.meta && !parsed.meta.form_key) {
+        parsed.meta.form_key = 's2010_p1_intake';
+      }
+      return parsed;
+    },
+    caseResolver: resolveCaseByCaseIdSmart_,
+    statusAfterSave: 'intake',
+    requireCaseId: true,
     afterSave: function () {
       return {};
     },
@@ -430,6 +449,82 @@ const FORM_INTAKE_REGISTRY = {
       return {};
     },
   },
+  s2005_creditors: {
+    name: 'S2005 債権者一覧表',
+    queueLabel: 'BAS/S2005/Queue',
+    parser: function (subject, body) {
+      if (typeof parseMetaBlock_ !== 'function') {
+        throw new Error('parseMetaBlock_ is not defined');
+      }
+      const meta = parseMetaBlock_(body) || {};
+      meta.form_key = meta.form_key || 's2005_creditors';
+      if (!meta.submission_id) {
+        const m = subject.match(/submission_id:(\d+)/) || subject.match(/提出\s+(\d{6,})/);
+        if (m) meta.submission_id = m[1];
+      }
+      const fields = (typeof parseFieldsBlock_ === 'function') ? parseFieldsBlock_(body) : [];
+      const model =
+        typeof mapS2005FieldsToModel_ === 'function' ? mapS2005FieldsToModel_(fields) : {};
+      return { meta, fieldsRaw: fields, model: model };
+    },
+    caseResolver: resolveCaseByCaseIdSmart_,
+    statusAfterSave: 'draft',
+    requireCaseId: true,
+    afterSave: function (caseInfo, parsed) {
+      if (typeof run_GenerateS2005DraftBySubmissionId !== 'function') return {};
+      try {
+        if (!caseInfo.folderId && typeof ensureCaseFolderId_ === 'function') {
+          caseInfo.folderId = ensureCaseFolderId_(caseInfo);
+        }
+      } catch (_) {}
+      const submissionId =
+        (parsed && parsed.meta && (parsed.meta.submission_id || parsed.meta.submissionId)) || '';
+      if (!submissionId) return {};
+      const caseId = caseInfo.caseId || caseInfo.case_id || '';
+      const draft = run_GenerateS2005DraftBySubmissionId(caseId, String(submissionId));
+      const patch = {};
+      if (draft && draft.url) patch.last_draft_url = draft.url;
+      return patch;
+    },
+  },
+  s2006_creditors_public: {
+    name: 'S2006 債権者一覧表（公租公課用）',
+    queueLabel: 'BAS/S2006/Queue',
+    parser: function (subject, body) {
+      if (typeof parseMetaBlock_ !== 'function') {
+        throw new Error('parseMetaBlock_ is not defined');
+      }
+      const meta = parseMetaBlock_(body) || {};
+      meta.form_key = meta.form_key || 's2006_creditors_public';
+      if (!meta.submission_id) {
+        const m = subject.match(/submission_id:(\d+)/) || subject.match(/提出\s+(\d{6,})/);
+        if (m) meta.submission_id = m[1];
+      }
+      const fields = (typeof parseFieldsBlock_ === 'function') ? parseFieldsBlock_(body) : [];
+      const model =
+        typeof mapS2006FieldsToModel_ === 'function' ? mapS2006FieldsToModel_(fields) : {};
+      return { meta, fieldsRaw: fields, model: model };
+    },
+    caseResolver: resolveCaseByCaseIdSmart_,
+    statusAfterSave: 'draft',
+    requireCaseId: true,
+    afterSave: function (caseInfo, parsed) {
+      if (typeof run_GenerateS2006DraftBySubmissionId !== 'function') return {};
+      try {
+        if (!caseInfo.folderId && typeof ensureCaseFolderId_ === 'function') {
+          caseInfo.folderId = ensureCaseFolderId_(caseInfo);
+        }
+      } catch (_) {}
+      const submissionId =
+        (parsed && parsed.meta && (parsed.meta.submission_id || parsed.meta.submissionId)) || '';
+      if (!submissionId) return {};
+      const caseId = caseInfo.caseId || caseInfo.case_id || '';
+      const draft = run_GenerateS2006DraftBySubmissionId(caseId, String(submissionId));
+      const patch = {};
+      if (draft && draft.url) patch.last_draft_url = draft.url;
+      return patch;
+    },
+  },
   s2010_p2_cause: {
     name: 'S2010 Part2(申立てに至った事情)',
     queueLabel: 'BAS/S2010P2/Queue',
@@ -441,8 +536,104 @@ const FORM_INTAKE_REGISTRY = {
     },
     caseResolver: resolveCaseByCaseIdSmart_,
     statusAfterSave: 'intake',
+    requireCaseId: true,
     afterSave: function () {
       return {};
+    },
+  },
+  s2010_userform: {
+    name: 'S2010 申立（統合）',
+    queueLabel: 'BAS/S2010/Queue',
+    parser: function (subject, body) {
+      if (typeof parseMetaBlock_ !== 'function') {
+        throw new Error('parseMetaBlock_ is not defined');
+      }
+      const meta = parseMetaBlock_(body) || {};
+      meta.form_key = meta.form_key || 's2010_userform';
+      if (!meta.submission_id) {
+        const m = subject.match(/submission_id:(\d+)/) || subject.match(/提出\s+(\d{6,})/);
+        if (m) meta.submission_id = m[1];
+      }
+      const fields = (typeof parseFieldsBlock_ === 'function') ? parseFieldsBlock_(body) : [];
+      return { meta, fieldsRaw: fields, model: {} };
+    },
+    caseResolver: resolveCaseByCaseIdSmart_,
+    statusAfterSave: 'draft',
+    requireCaseId: true,
+    afterSave: function (caseInfo) {
+      if (typeof run_GenerateS2010DraftByCaseId !== 'function') return {};
+      const caseId = caseInfo.caseId || caseInfo.case_id || '';
+      if (!caseId) return {};
+      const draft = run_GenerateS2010DraftByCaseId(caseId);
+      const patch = {};
+      if (draft && draft.draftUrl) patch.last_draft_url = draft.draftUrl;
+      return patch;
+    },
+  },
+  s2011_income_m1: {
+    name: 'S2011 家計収支（1か月目）',
+    queueLabel: 'BAS/S2011/Queue',
+    parser: function (subject, body) {
+      if (typeof parseMetaBlock_ !== 'function') {
+        throw new Error('parseMetaBlock_ is not defined');
+      }
+      const meta = parseMetaBlock_(body) || {};
+      meta.form_key = meta.form_key || 's2011_income_m1';
+      if (!meta.submission_id) {
+        const m = subject.match(/submission_id:(\d+)/) || subject.match(/提出\s+(\d{6,})/);
+        if (m) meta.submission_id = m[1];
+      }
+      const fields = (typeof parseFieldsBlock_ === 'function') ? parseFieldsBlock_(body) : [];
+      const model =
+        typeof mapS2011_TableDriven_ === 'function' ? mapS2011_TableDriven_(fields, meta) : {};
+      return { meta, fieldsRaw: fields, model: model };
+    },
+    caseResolver: resolveCaseByCaseIdSmart_,
+    statusAfterSave: 'draft',
+    requireCaseId: true,
+    afterSave: function (caseInfo, parsed) {
+      if (typeof run_GenerateS2011DraftBySubmissionId !== 'function') return {};
+      const submissionId =
+        (parsed && parsed.meta && (parsed.meta.submission_id || parsed.meta.submissionId)) || '';
+      if (!submissionId) return {};
+      const caseId = caseInfo.caseId || caseInfo.case_id || '';
+      const draft = run_GenerateS2011DraftBySubmissionId(caseId, String(submissionId), 's2011_income_m1');
+      const patch = {};
+      if (draft && draft.url) patch.last_draft_url = draft.url;
+      return patch;
+    },
+  },
+  s2011_income_m2: {
+    name: 'S2011 家計収支（2か月目）',
+    queueLabel: 'BAS/S2011/Queue',
+    parser: function (subject, body) {
+      if (typeof parseMetaBlock_ !== 'function') {
+        throw new Error('parseMetaBlock_ is not defined');
+      }
+      const meta = parseMetaBlock_(body) || {};
+      meta.form_key = meta.form_key || 's2011_income_m2';
+      if (!meta.submission_id) {
+        const m = subject.match(/submission_id:(\d+)/) || subject.match(/提出\s+(\d{6,})/);
+        if (m) meta.submission_id = m[1];
+      }
+      const fields = (typeof parseFieldsBlock_ === 'function') ? parseFieldsBlock_(body) : [];
+      const model =
+        typeof mapS2011_TableDriven_ === 'function' ? mapS2011_TableDriven_(fields, meta) : {};
+      return { meta, fieldsRaw: fields, model: model };
+    },
+    caseResolver: resolveCaseByCaseIdSmart_,
+    statusAfterSave: 'draft',
+    requireCaseId: true,
+    afterSave: function (caseInfo, parsed) {
+      if (typeof run_GenerateS2011DraftBySubmissionId !== 'function') return {};
+      const submissionId =
+        (parsed && parsed.meta && (parsed.meta.submission_id || parsed.meta.submissionId)) || '';
+      if (!submissionId) return {};
+      const caseId = caseInfo.caseId || caseInfo.case_id || '';
+      const draft = run_GenerateS2011DraftBySubmissionId(caseId, String(submissionId), 's2011_income_m2');
+      const patch = {};
+      if (draft && draft.url) patch.last_draft_url = draft.url;
+      return patch;
     },
   },
 };
@@ -922,6 +1113,39 @@ function formIntake_normalizeUserKey_(value) {
   return (raw + 'xxxxxx').slice(0, 6);
 }
 
+function formIntake_normalizeFormKey_(rawKey, subject, meta) {
+  var key = String(rawKey || '').trim();
+  if (key && FORM_INTAKE_REGISTRY[key]) return key;
+  var low = key.toLowerCase();
+  if (/^s2010_p1/.test(low)) return 's2010_p1_career';
+  if (/^s2010_p2/.test(low)) return 's2010_p2_cause';
+  if (/^s2010/.test(low)) return 's2010_userform';
+  if (/^s2011_income_m1/.test(low)) return 's2011_income_m1';
+  if (/^s2011_income_m2/.test(low)) return 's2011_income_m2';
+  if (key && FORM_INTAKE_REGISTRY[key]) return key;
+
+  var subj = String(subject || '');
+  var subjLow = subj.toLowerCase();
+  var formName = String((meta && meta.form_name) || '').trim();
+  if (/s2006/.test(subjLow) || /公租公課/.test(subj) || /債権者一覧表（公租公課用）/.test(formName)) {
+    return 's2006_creditors_public';
+  }
+  if (/s2005/.test(subjLow) || (/債権者一覧表/.test(subj) && !/公租公課/.test(subj))) {
+    return 's2005_creditors';
+  }
+  if (/s2010/.test(subjLow) || /S2010/.test(formName)) {
+    if (/part\s*1/i.test(subj) || /経歴/.test(subj) || /経歴/.test(formName)) return 's2010_p1_career';
+    if (/part\s*2/i.test(subj) || /事情/.test(subj) || /事情/.test(formName)) return 's2010_p2_cause';
+    return 's2010_userform';
+  }
+  if (/s2011/.test(subjLow) || /S2011/.test(formName)) {
+    if (/m1|1か月|１か月|1ヶ月/.test(subj) || /1か月|１か月|1ヶ月/.test(formName)) return 's2011_income_m1';
+    if (/m2|2か月|２か月|2ヶ月/.test(subj) || /2か月|２か月|2ヶ月/.test(formName)) return 's2011_income_m2';
+    return 's2011_income_m2';
+  }
+  return key;
+}
+
 function formIntake_generateUserKey_(meta) {
   // intake はメールだけでは user_key を決めない（誤決定を防ぐ）
   try {
@@ -965,16 +1189,44 @@ function formIntake_issueNewCase_(meta) {
 function formIntake_prepareCaseInfo_(meta, def, parsed) {
   const metaObj = meta || {};
   if (parsed && !parsed.meta) parsed.meta = metaObj;
+  let email = String(metaObj.email || metaObj.mail || '').trim();
+  if (!email && parsed && parsed.model) {
+    email =
+      String(
+        parsed.model.email ||
+          (parsed.model.applicant && parsed.model.applicant.email) ||
+          ''
+      ).trim();
+  }
+  if (email && !metaObj.email) metaObj.email = email;
   let caseId = formIntake_normalizeCaseId_(metaObj.case_id || metaObj.caseId);
   let userKey = formIntake_normalizeUserKey_(metaObj.user_key || metaObj.userKey);
   let lineId = String(metaObj.line_id || metaObj.lineId || '').trim();
-  if (!userKey && metaObj.email && typeof lookupUserKeyByEmail_ === 'function') {
-    userKey = formIntake_normalizeUserKey_(lookupUserKeyByEmail_(metaObj.email));
+  if (!userKey && email && typeof lookupUserKeyByEmail_ === 'function') {
+    userKey = formIntake_normalizeUserKey_(lookupUserKeyByEmail_(email));
   }
   if (!lineId && typeof lookupLineIdByUserKey_ === 'function' && userKey) {
     lineId = String(lookupLineIdByUserKey_(userKey) || '').trim();
   }
+  if (!caseId && metaObj.case_key) {
+    const m = String(metaObj.case_key || '').match(/-(\d{4})$/);
+    if (m) caseId = formIntake_normalizeCaseId_(m[1]);
+  }
+  if (!caseId && email && typeof fi_contactsLookupByEmail_ === 'function') {
+    const hit = fi_contactsLookupByEmail_(email);
+    if (hit) {
+      if (!caseId && hit.active_case_id) caseId = formIntake_normalizeCaseId_(hit.active_case_id);
+      if (!lineId && hit.line_id) lineId = String(hit.line_id || '').trim();
+      if (!userKey && hit.user_key) userKey = formIntake_normalizeUserKey_(hit.user_key);
+    }
+  }
+  if (!caseId && lineId && typeof lookupCaseIdByLineId_ === 'function') {
+    caseId = formIntake_normalizeCaseId_(lookupCaseIdByLineId_(lineId));
+  }
   if (!caseId) {
+    if (def && def.requireCaseId) {
+      throw new Error('case_id is required for form_key=' + String(metaObj.form_key || ''));
+    }
     const issued = formIntake_issueNewCase_(metaObj);
     caseId = issued.caseId;
     userKey = issued.userKey || userKey;
@@ -1041,9 +1293,21 @@ function run_ProcessInbox_AllForms() {
         const subject = msg.getSubject();
         const parsed = def.parser(subject, body);
         const meta = parsed?.meta || {};
-        const actualKey = String(meta.form_key || '').trim();
+        const actualKeyRaw = String(meta.form_key || meta.formKey || '').trim();
+        const actualKey = formIntake_normalizeFormKey_(actualKeyRaw, subject, meta);
+        if (actualKey && actualKey !== actualKeyRaw) {
+          meta.form_key = actualKey;
+          parsed.meta = meta;
+        }
         if (actualKey !== formKey) {
-          thread.removeLabel(queueLabel);
+          const actualDef = actualKey ? FORM_INTAKE_REGISTRY[actualKey] : null;
+          const actualQueue = actualDef ? actualDef.queueLabel : '';
+          if (actualQueue && actualQueue !== def.queueLabel) {
+            thread.addLabel(formIntake_labelOrCreate_(actualQueue));
+            try {
+              thread.removeLabel(queueLabel);
+            } catch (_) {}
+          }
           if (locked) thread.removeLabel(lockLabel);
           return;
         }
@@ -1455,7 +1719,7 @@ function run_ProcessInbox_AllForms() {
 }
 
 function formIntake_assignQueueLabels_() {
-  const query = `label:${FORM_INTAKE_LABEL_TO_PROCESS} ("form_key:" OR "==== META START ====")`;
+  const query = `label:${FORM_INTAKE_LABEL_TO_PROCESS}`;
   const threads = GmailApp.search(query, 0, 100);
   threads.forEach(function (thread) {
     try {
@@ -1463,8 +1727,10 @@ function formIntake_assignQueueLabels_() {
       if (!messages || !messages.length) return;
       const msg = messages[0];
       const body = msg.getPlainBody() || HtmlService.createHtmlOutput(msg.getBody()).getContent();
-      const meta = parseMetaBlock_(body);
-      const formKey = String(meta?.form_key || '').trim();
+      let meta = {};
+      try { meta = parseMetaBlock_(body) || {}; } catch (_) { meta = {}; }
+      const formKeyRaw = String(meta?.form_key || meta?.formKey || '').trim();
+      const formKey = formIntake_normalizeFormKey_(formKeyRaw, msg.getSubject(), meta);
       const def = FORM_INTAKE_REGISTRY[formKey];
       if (def) {
         thread.addLabel(formIntake_labelOrCreate_(def.queueLabel));
