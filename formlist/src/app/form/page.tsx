@@ -105,8 +105,7 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
       hidden: true, // 当面は一覧に出さない（6フォーム運用）
     },
   ];
-  const visibleForms = forms.filter((form) => !form.hidden);
-  return { forms: visibleForms };
+  return { forms };
 }
 
 // 署名付きの /api/status を信頼し、GAS直叩きのフォールバックは行わない
@@ -119,6 +118,14 @@ export default async function FormPage() {
   const displayName = session?.user?.name ?? '';
 
   if (!lineId) redirect('/login');
+
+  const formsVisible = forms.filter((form) => {
+    if (!form.hidden) return true;
+    if (form.formKey === 'supporting_documents_payslip_m1') {
+      return lineId === 'Uc13df94016ee50eb9dd5552bffbe6624';
+    }
+    return false;
+  });
 
   // ステータス問い合わせ（caseId が無ければ intake フォームのみ表示）
   const h = await headers();
@@ -200,16 +207,16 @@ export default async function FormPage() {
   const intakeSubmitted = status?.hasIntake ?? Boolean(caseId);
   const caseReady = Boolean(caseId);
   const intakeFormIdEnv = process.env.NEXT_PUBLIC_INTAKE_FORM_ID;
-  const fallbackIntakeFormId = forms[0]?.formId;
+  const fallbackIntakeFormId = formsVisible[0]?.formId;
   const preferredIntakeFormId =
     intakeFormIdEnv && intakeFormIdEnv.length > 0 ? intakeFormIdEnv : fallbackIntakeFormId;
   const intakeBase =
     process.env.NEXT_PUBLIC_INTAKE_FORM_URL ??
-    forms.find((f) => f.formKey === 'intake_form')?.baseUrl ??
+    formsVisible.find((f) => f.formKey === 'intake_form')?.baseUrl ??
     'https://business.form-mailer.jp/fms/47a7602b302516';
   const userEmail = session?.user?.email ?? '';
 
-  const formsWithHref = forms.map((f, index) => {
+  const formsWithHref = formsVisible.map((f, index) => {
     const isIntakeForm =
       preferredIntakeFormId && preferredIntakeFormId.length > 0
         ? f.formId === preferredIntakeFormId

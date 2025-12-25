@@ -4,11 +4,12 @@
  *  - FORM_REGISTRY にエントリを追加するだけで新フォームを取り込める
  */
 
-const FORM_INTAKE_LABEL_TO_PROCESS =
-  typeof LABEL_TO_PROCESS === 'string' ? LABEL_TO_PROCESS : 'FormAttach/ToProcess';
-const FORM_INTAKE_LABEL_PROCESSED =
-  typeof LABEL_PROCESSED === 'string' ? LABEL_PROCESSED : 'FormAttach/Processed';
-const FORM_INTAKE_LABEL_LOCK = 'BAS/lock';
+const FORM_INTAKE_LABEL_TO_PROCESS = 'FormAttach/ToProcess';
+const FORM_INTAKE_LABEL_PROCESSED = 'FormAttach/Processed';
+const FORM_INTAKE_LABEL_ERROR = 'FormAttach/Error';
+const FORM_INTAKE_LABEL_NO_META = 'FormAttach/NoMeta';
+const FORM_INTAKE_LABEL_REJECTED = 'FormAttach/Rejected';
+const FORM_INTAKE_LABEL_LOCK = ''; // ScriptLockで排他するためラベルロックは廃止
 
 // ===== FIELDS ブロック抽出（メール本文から） =====
 if (typeof parseFieldsBlock_ !== 'function') {
@@ -369,7 +370,6 @@ function resolveCaseByCaseIdSmart_(caseId) {
 const FORM_INTAKE_REGISTRY = {
   intake: {
     name: '初回受付',
-    queueLabel: 'BAS/Intake/Queue',
     parser: function (subject, body) {
       if (typeof parseMetaBlock_ !== 'function') {
         throw new Error('parseMetaBlock_ is not defined');
@@ -387,7 +387,6 @@ const FORM_INTAKE_REGISTRY = {
 
   s2010_p1_career: {
     name: 'S2010 Part1(経歴等)',
-    queueLabel: 'BAS/S2010P1/Queue',
     parser: function (subject, body) {
       if (typeof parseFormMail_S2010_P1_ !== 'function') {
         throw new Error('parseFormMail_S2010_P1_ is not defined');
@@ -397,13 +396,25 @@ const FORM_INTAKE_REGISTRY = {
     caseResolver: resolveCaseByCaseIdSmart_,
     statusAfterSave: 'intake',
     requireCaseId: true,
-    afterSave: function () {
+    afterSave: function (caseInfo, parsed) {
+      const caseId = caseInfo.caseId || caseInfo.case_id || (parsed && parsed.meta && parsed.meta.case_id) || '';
+      const folderId = caseInfo.folderId || caseInfo.folder_id || '';
+      if (!caseId || !folderId) return {};
+      if (typeof haveAllPartsS2010_ !== 'function' || typeof run_GenerateS2010DraftMergedByCaseId !== 'function') {
+        return {};
+      }
+      const prefixes =
+        typeof S2010_PART_PREFIXES !== 'undefined' && S2010_PART_PREFIXES
+          ? S2010_PART_PREFIXES
+          : ['s2010_p1_', 's2010_p2_'];
+      if (haveAllPartsS2010_(folderId, prefixes)) {
+        run_GenerateS2010DraftMergedByCaseId(caseId);
+      }
       return {};
     },
   },
   s2010_p1_intake: {
     name: 'S2010 Part1(経歴等)',
-    queueLabel: 'BAS/S2010P1/Queue',
     parser: function (subject, body) {
       if (typeof parseFormMail_S2010_P1_ !== 'function') {
         throw new Error('parseFormMail_S2010_P1_ is not defined');
@@ -423,8 +434,6 @@ const FORM_INTAKE_REGISTRY = {
   },
   s2002_userform: {
     name: 'S2002 申立',
-    queueLabel: 'BAS/S2002/Queue',
-    processedLabel: 'BAS/S2002/Processed',
     parser: function (subject, body) {
       if (typeof parseFormMail_ !== 'function') {
         throw new Error('parseFormMail_ is not defined');
@@ -451,7 +460,6 @@ const FORM_INTAKE_REGISTRY = {
   },
   s2005_creditors: {
     name: 'S2005 債権者一覧表',
-    queueLabel: 'BAS/S2005/Queue',
     parser: function (subject, body) {
       if (typeof parseMetaBlock_ !== 'function') {
         throw new Error('parseMetaBlock_ is not defined');
@@ -489,7 +497,6 @@ const FORM_INTAKE_REGISTRY = {
   },
   s2006_creditors_public: {
     name: 'S2006 債権者一覧表（公租公課用）',
-    queueLabel: 'BAS/S2006/Queue',
     parser: function (subject, body) {
       if (typeof parseMetaBlock_ !== 'function') {
         throw new Error('parseMetaBlock_ is not defined');
@@ -527,7 +534,6 @@ const FORM_INTAKE_REGISTRY = {
   },
   s2010_p2_cause: {
     name: 'S2010 Part2(申立てに至った事情)',
-    queueLabel: 'BAS/S2010P2/Queue',
     parser: function (subject, body) {
       if (typeof parseFormMail_S2010_P2_ !== 'function') {
         throw new Error('parseFormMail_S2010_P2_ is not defined');
@@ -537,13 +543,25 @@ const FORM_INTAKE_REGISTRY = {
     caseResolver: resolveCaseByCaseIdSmart_,
     statusAfterSave: 'intake',
     requireCaseId: true,
-    afterSave: function () {
+    afterSave: function (caseInfo, parsed) {
+      const caseId = caseInfo.caseId || caseInfo.case_id || (parsed && parsed.meta && parsed.meta.case_id) || '';
+      const folderId = caseInfo.folderId || caseInfo.folder_id || '';
+      if (!caseId || !folderId) return {};
+      if (typeof haveAllPartsS2010_ !== 'function' || typeof run_GenerateS2010DraftMergedByCaseId !== 'function') {
+        return {};
+      }
+      const prefixes =
+        typeof S2010_PART_PREFIXES !== 'undefined' && S2010_PART_PREFIXES
+          ? S2010_PART_PREFIXES
+          : ['s2010_p1_', 's2010_p2_'];
+      if (haveAllPartsS2010_(folderId, prefixes)) {
+        run_GenerateS2010DraftMergedByCaseId(caseId);
+      }
       return {};
     },
   },
   s2010_userform: {
     name: 'S2010 申立（統合）',
-    queueLabel: 'BAS/S2010/Queue',
     parser: function (subject, body) {
       if (typeof parseMetaBlock_ !== 'function') {
         throw new Error('parseMetaBlock_ is not defined');
@@ -572,7 +590,6 @@ const FORM_INTAKE_REGISTRY = {
   },
   s2011_income_m1: {
     name: 'S2011 家計収支（1か月目）',
-    queueLabel: 'BAS/S2011/Queue',
     parser: function (subject, body) {
       if (typeof parseMetaBlock_ !== 'function') {
         throw new Error('parseMetaBlock_ is not defined');
@@ -605,7 +622,6 @@ const FORM_INTAKE_REGISTRY = {
   },
   s2011_income_m2: {
     name: 'S2011 家計収支（2か月目）',
-    queueLabel: 'BAS/S2011/Queue',
     parser: function (subject, body) {
       if (typeof parseMetaBlock_ !== 'function') {
         throw new Error('parseMetaBlock_ is not defined');
@@ -638,9 +654,7 @@ const FORM_INTAKE_REGISTRY = {
   },
 };
 
-const FORM_INTAKE_QUEUE_LABELS = Object.freeze(
-  Array.from(new Set(Object.values(FORM_INTAKE_REGISTRY).map((def) => def.queueLabel)))
-);
+const FORM_INTAKE_QUEUE_LABELS = Object.freeze([]); // フォーム別Queueラベルは廃止
 
 const FORM_INTAKE_LABEL_CACHE = {};
 
@@ -1004,8 +1018,11 @@ function getLineIdFromContext_(req, msg, obj) {
 
   try {
     var sp = PropertiesService.getScriptProperties();
-    var lid5 = String(sp.getProperty('LAST_LINE_ID') || '').trim();
-    if (lid5) return lid5;
+    var allowLast = String(sp.getProperty('ALLOW_LAST_LINE_ID_FALLBACK') || '').trim().toLowerCase();
+    if (allowLast === '1' || allowLast === 'true') {
+      var lid5 = String(sp.getProperty('LAST_LINE_ID') || '').trim();
+      if (lid5) return lid5;
+    }
   } catch (_) {}
 
   return '';
@@ -1141,9 +1158,9 @@ function formIntake_normalizeFormKey_(rawKey, subject, meta) {
   if (/s2011/.test(subjLow) || /S2011/.test(formName)) {
     if (/m1|1か月|１か月|1ヶ月/.test(subj) || /1か月|１か月|1ヶ月/.test(formName)) return 's2011_income_m1';
     if (/m2|2か月|２か月|2ヶ月/.test(subj) || /2か月|２か月|2ヶ月/.test(formName)) return 's2011_income_m2';
-    return 's2011_income_m2';
+    return '';
   }
-  return key;
+  return '';
 }
 
 function formIntake_generateUserKey_(meta) {
@@ -1265,166 +1282,196 @@ function getFormLockLabel_() {
 }
 
 function run_ProcessInbox_AllForms() {
-  formIntake_assignQueueLabels_();
+  const scriptLock = LockService.getScriptLock();
+  if (!scriptLock.tryLock(30000)) return;
+  try {
+    const lockLabel = null;
+    const processedLabelDefault = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_PROCESSED);
+    const toProcessLabel = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_TO_PROCESS);
+    const errorLabel = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_ERROR);
+    const noMetaLabel = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_NO_META);
+    const rejectedLabel = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_REJECTED);
 
-  const lockLabel = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_LOCK);
-  const processedLabelDefault = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_PROCESSED);
-  const toProcessLabel = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_TO_PROCESS);
+    const query = `label:${FORM_INTAKE_LABEL_TO_PROCESS}`;
+    while (true) {
+      const threads = GmailApp.search(query, 0, 50);
+      if (!threads.length) break;
+      threads.forEach(function (thread) {
+        const messages = thread.getMessages();
+        if (!messages || !messages.length) return;
 
-  Object.keys(FORM_INTAKE_REGISTRY).forEach(function (formKey) {
-    const def = FORM_INTAKE_REGISTRY[formKey];
-    const queueLabel = formIntake_labelOrCreate_(def.queueLabel);
-    const processedLabel = def.processedLabel
-      ? formIntake_labelOrCreate_(def.processedLabel)
-      : processedLabelDefault;
-    const query = `label:${def.queueLabel} -label:${FORM_INTAKE_LABEL_LOCK}`;
-    const threads = GmailApp.search(query, 0, 50);
-    threads.forEach(function (thread) {
-      const messages = thread.getMessages();
-      if (!messages || !messages.length) return;
-
-      const msg = messages[0];
-      let locked = false;
-      try {
-        thread.addLabel(lockLabel);
-        locked = true;
-
-        const body = msg.getPlainBody() || HtmlService.createHtmlOutput(msg.getBody()).getContent();
-        const subject = msg.getSubject();
-        const parsed = def.parser(subject, body);
-        const meta = parsed?.meta || {};
-        const actualKeyRaw = String(meta.form_key || meta.formKey || '').trim();
-        const actualKey = formIntake_normalizeFormKey_(actualKeyRaw, subject, meta);
-        if (actualKey && actualKey !== actualKeyRaw) {
-          meta.form_key = actualKey;
-          parsed.meta = meta;
-        }
-        if (actualKey !== formKey) {
-          const actualDef = actualKey ? FORM_INTAKE_REGISTRY[actualKey] : null;
-          const actualQueue = actualDef ? actualDef.queueLabel : '';
-          if (actualQueue && actualQueue !== def.queueLabel) {
-            thread.addLabel(formIntake_labelOrCreate_(actualQueue));
-            try {
-              thread.removeLabel(queueLabel);
-            } catch (_) {}
-          }
-          if (locked) thread.removeLabel(lockLabel);
-          return;
-        }
-
-        // ===== intake はケース採番・保存の前に、まず staging へ保存して終了（重複採番防止） =====
-        const formKeyForStatusEarly = String(meta.form_key || actualKey || '').trim();
-        if (formKeyForStatusEarly === 'intake') {
+        const msg = messages[0];
+        let def = null;
+        try {
+          const body = msg.getPlainBody() || _htmlToText_(msg.getBody());
+          const subject = msg.getSubject();
+          let metaHint = {};
           try {
-            const P = PropertiesService.getScriptProperties();
-            const EXPECT = String(P.getProperty('NOTIFY_SECRET') || '').trim();
-            const ALLOW_NO_SECRET = (P.getProperty('ALLOW_NO_SECRET') || '').toLowerCase() === '1';
-            const provided = String((meta && meta.secret) || '').trim();
-            if (EXPECT && !ALLOW_NO_SECRET && provided !== EXPECT) {
-              try { Logger.log('[Intake] secret mismatch (early): meta.secret=%s', provided || '(empty)'); } catch (_) {}
-              formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, false);
-              return;
-            }
-          } catch (_) {}
+            metaHint = parseMetaBlock_(body) || {};
+          } catch (_) {
+            metaHint = {};
+          }
+          const initialKeyRaw = String(metaHint.form_key || metaHint.formKey || '').trim();
+          const initialKey = formIntake_normalizeFormKey_(initialKeyRaw, subject, metaHint);
+          if (!initialKey) {
+            formIntake_markFailed_(thread, lockLabel, toProcessLabel, noMetaLabel);
+            return;
+          }
+          def = FORM_INTAKE_REGISTRY[initialKey];
+          if (!def) {
+            formIntake_markFailed_(thread, lockLabel, toProcessLabel, noMetaLabel);
+            return;
+          }
 
-          if (!meta.submission_id) {
-            meta.submission_id =
-              meta.submissionId ||
-              (typeof Utilities !== 'undefined' && typeof Utilities.getUuid === 'function'
-                ? Utilities.getUuid()
-                : String(Date.now()));
-            if (!meta.submissionId) meta.submissionId = meta.submission_id;
+          let parsed = def.parser(subject, body);
+          let meta = parsed?.meta || {};
+          let actualKeyRaw = String(meta.form_key || meta.formKey || '').trim();
+          let actualKey = formIntake_normalizeFormKey_(actualKeyRaw, subject, meta);
+          if (actualKey && actualKey !== actualKeyRaw) {
+            meta.form_key = actualKey;
             parsed.meta = meta;
           }
+          if (actualKey && actualKey !== initialKey) {
+            const actualDef = FORM_INTAKE_REGISTRY[actualKey];
+            if (!actualDef) {
+              formIntake_markFailed_(thread, lockLabel, toProcessLabel, noMetaLabel);
+              return;
+            }
+            if (actualDef !== def) {
+              def = actualDef;
+              parsed = def.parser(subject, body);
+              meta = parsed?.meta || meta;
+              actualKeyRaw = String(meta.form_key || meta.formKey || '').trim();
+              actualKey = formIntake_normalizeFormKey_(actualKeyRaw, subject, meta);
+              if (actualKey && actualKey !== actualKeyRaw) {
+                meta.form_key = actualKey;
+                parsed.meta = meta;
+              }
+            }
+          }
+          if (!actualKey) {
+            formIntake_markFailed_(thread, lockLabel, toProcessLabel, noMetaLabel);
+            return;
+          }
 
-          const P = PropertiesService.getScriptProperties();
-          const ROOT_ID = P.getProperty('DRIVE_ROOT_FOLDER_ID') || P.getProperty('ROOT_FOLDER_ID');
-          const root = DriveApp.getFolderById(ROOT_ID);
-          const itSt = root.getFoldersByName('_email_staging');
-          const staging = itSt.hasNext() ? itSt.next() : root.createFolder('_email_staging');
-          // line_id を多系統から最優先で抽出
-          var knownLineIdEarly = '';
-          try { knownLineIdEarly = getLineIdFromContext_(null /*req*/, msg, parsed) || ''; } catch (_) {}
-          // caseId はパラメータ or 既存meta
-          var knownCaseIdEarly = '';
-          try { knownCaseIdEarly = String(meta.case_id || meta.caseId || '').replace(/\D/g, ''); } catch (_) {}
+          const queueLabel = toProcessLabel;
+          const processedLabel = def.processedLabel
+            ? formIntake_labelOrCreate_(def.processedLabel)
+            : processedLabelDefault;
 
-          // メタ補完（email抽出＋contacts 逆引き）→ バリデーション（隔離）
-          const emailEarly = (function () {
-            try { return _extractEmail_({ msg, obj: parsed, rawText: body }); } catch (_) { return ''; }
-          })();
-          try {
-            parsed = _fillMetaBeforeStage_(parsed, {
-              knownLineId: knownLineIdEarly,
-              knownCaseId: knownCaseIdEarly,
-              email: emailEarly,
-            });
-          } catch (_) {}
-          if (!(emailEarly || (parsed && parsed.meta && parsed.meta.line_id))) {
+          // ===== intake はケース採番・保存の前に、まず staging へ保存して終了（重複採番防止） =====
+          const formKeyForStatusEarly = String(meta.form_key || actualKey || '').trim();
+          if (formKeyForStatusEarly === 'intake') {
             try {
-              const itQe = root.getFoldersByName('_quarantine');
-              const qfe = itQe.hasNext() ? itQe.next() : root.createFolder('_quarantine');
-              const qne = `raw_intake__${meta.submission_id || Date.now()}.json`;
-              qfe.createFile(
-                Utilities.newBlob(
-                  JSON.stringify({ raw: parsed, note: 'no_email_no_lineid' }),
-                  'application/json',
-                  qne
-                )
+              const P = PropertiesService.getScriptProperties();
+              const EXPECT = String(P.getProperty('NOTIFY_SECRET') || '').trim();
+              const ALLOW_NO_SECRET = (P.getProperty('ALLOW_NO_SECRET') || '').toLowerCase() === '1';
+              const provided = String((meta && meta.secret) || '').trim();
+              if (EXPECT && !ALLOW_NO_SECRET && provided !== EXPECT) {
+                try { Logger.log('[Intake] secret mismatch (early): meta.secret=%s', provided || '(empty)'); } catch (_) {}
+                formIntake_markFailed_(thread, lockLabel, toProcessLabel, rejectedLabel);
+                return;
+              }
+            } catch (_) {}
+
+            if (!meta.submission_id) {
+              meta.submission_id =
+                meta.submissionId ||
+                (typeof Utilities !== 'undefined' && typeof Utilities.getUuid === 'function'
+                  ? Utilities.getUuid()
+                  : String(Date.now()));
+              if (!meta.submissionId) meta.submissionId = meta.submission_id;
+              parsed.meta = meta;
+            }
+
+            const P = PropertiesService.getScriptProperties();
+            const ROOT_ID = P.getProperty('DRIVE_ROOT_FOLDER_ID') || P.getProperty('ROOT_FOLDER_ID');
+            const root = DriveApp.getFolderById(ROOT_ID);
+            const itSt = root.getFoldersByName('_email_staging');
+            const staging = itSt.hasNext() ? itSt.next() : root.createFolder('_email_staging');
+            // line_id を多系統から最優先で抽出
+            var knownLineIdEarly = '';
+            try { knownLineIdEarly = getLineIdFromContext_(null /*req*/, msg, parsed) || ''; } catch (_) {}
+            // caseId はパラメータ or 既存meta
+            var knownCaseIdEarly = '';
+            try { knownCaseIdEarly = String(meta.case_id || meta.caseId || '').replace(/\D/g, ''); } catch (_) {}
+
+            // メタ補完（email抽出＋contacts 逆引き）→ バリデーション（隔離）
+            const emailEarly = (function () {
+              try { return _extractEmail_({ msg, obj: parsed, rawText: body }); } catch (_) { return ''; }
+            })();
+            try {
+              parsed = _fillMetaBeforeStage_(parsed, {
+                knownLineId: knownLineIdEarly,
+                knownCaseId: knownCaseIdEarly,
+                email: emailEarly,
+              });
+            } catch (_) {}
+            if (!(emailEarly || (parsed && parsed.meta && parsed.meta.line_id))) {
+              try {
+                const itQe = root.getFoldersByName('_quarantine');
+                const qfe = itQe.hasNext() ? itQe.next() : root.createFolder('_quarantine');
+                const qne = `raw_intake__${meta.submission_id || Date.now()}.json`;
+                qfe.createFile(
+                  Utilities.newBlob(
+                    JSON.stringify({ raw: parsed, note: 'no_email_no_lineid' }),
+                    'application/json',
+                    qne
+                  )
+                );
+                Logger.log('[Intake][drop] no identifiers; quarantined %s', qne);
+              } catch (_) {}
+              formIntake_markFailed_(thread, lockLabel, toProcessLabel, noMetaLabel);
+              return;
+            }
+            // 追加: 保存直前に、候補群から採用源と優先キーを確定
+            try {
+              var ukEarly = '';
+              try { ukEarly = fi_userKeyFromLineId_(String(parsed?.meta?.line_id || knownLineIdEarly || '')) || ''; } catch (_) {}
+              var knownEarly = {
+                case_key: (ukEarly && knownCaseIdEarly) ? (String(ukEarly).toLowerCase() + '-' + normCaseId_(knownCaseIdEarly)) : '',
+                case_id: normCaseId_(knownCaseIdEarly || ''),
+                line_id: String(parsed?.meta?.line_id || knownLineIdEarly || ''),
+              };
+              var fromCasesEarly = (typeof fi_casesLookup_ === 'function') ? fi_casesLookup_({ lineId: knownEarly.line_id, caseId: knownEarly.case_id }) : null;
+              var fromContactsEarly = (typeof fi_contactsLookupByEmail_ === 'function') ? fi_contactsLookupByEmail_(emailEarly) : null;
+              var candEarly = {
+                fromCases: fromCasesEarly,
+                fromContacts: fromContactsEarly,
+                fromLine: { line_id: knownEarly.line_id, user_key: ukEarly },
+                metaInMail: parsed && parsed.meta,
+              };
+              var rEarly = resolveMetaWithPriority_(candEarly, knownEarly);
+              var mEarly = rEarly && rEarly.meta || {};
+              parsed.meta = parsed.meta || {};
+              parsed.meta.user_key = parsed.meta.user_key || mEarly.user_key || ukEarly || parsed.meta.userKey || '';
+              parsed.meta.case_id  = normCaseId_(parsed.meta.case_id || parsed.meta.caseId || mEarly.case_id || knownEarly.case_id || '');
+              parsed.meta.case_key = normCaseKey_(parsed.meta.case_key || parsed.meta.caseKey || mEarly.case_key || ((parsed.meta.user_key && parsed.meta.case_id) ? (String(parsed.meta.user_key).toLowerCase() + '-' + parsed.meta.case_id) : ''));
+              parsed.meta.line_id  = parsed.meta.line_id || mEarly.line_id || knownEarly.line_id || '';
+              try { Logger.log('[Intake] adopt(by=%s,source=%s) candidates=%s', rEarly.by || '', rEarly.source || '', JSON.stringify(buildCandidates_(candEarly))); } catch (_) {}
+            } catch (_) {}
+            const fname = `intake__${meta.submission_id}.json`;
+            const blob = Utilities.newBlob(JSON.stringify(parsed, null, 2), 'application/json', fname);
+            const createdFile = staging.createFile(blob);
+            // write-through mover: 保存直後に可能ならケース直下へ移送（フォルダ未作成時は静かにスキップ）
+            try { if (typeof tryMoveIntakeToCase_ === 'function') tryMoveIntakeToCase_(parsed && parsed.meta, createdFile, fname); } catch (_) {}
+            try {
+              var candidatesEarlyJson = (function(){ try { return JSON.stringify(buildCandidates_(candEarly)); } catch(_) { return '[]'; } })();
+              Logger.log(
+                '[Intake] staged name=%s meta={lid:%s, uk:%s, cid:%s, ckey:%s} by=%s source=%s candidates=%s',
+                fname,
+                (parsed && parsed.meta && parsed.meta.line_id) || '',
+                (parsed && parsed.meta && parsed.meta.user_key) || '',
+                (parsed && parsed.meta && parsed.meta.case_id) || '',
+                (parsed && parsed.meta && parsed.meta.case_key) || '',
+                (rEarly && rEarly.by) || '',
+                (rEarly && rEarly.source) || 'unknown',
+                candidatesEarlyJson
               );
-              Logger.log('[Intake][drop] no identifiers; quarantined %s', qne);
             } catch (_) {}
             formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, true);
             return;
           }
-          // 追加: 保存直前に、候補群から採用源と優先キーを確定
-          try {
-            var ukEarly = '';
-            try { ukEarly = fi_userKeyFromLineId_(String(parsed?.meta?.line_id || knownLineIdEarly || '')) || ''; } catch (_) {}
-            var knownEarly = {
-              case_key: (ukEarly && knownCaseIdEarly) ? (String(ukEarly).toLowerCase() + '-' + normCaseId_(knownCaseIdEarly)) : '',
-              case_id: normCaseId_(knownCaseIdEarly || ''),
-              line_id: String(parsed?.meta?.line_id || knownLineIdEarly || ''),
-            };
-            var fromCasesEarly = (typeof fi_casesLookup_ === 'function') ? fi_casesLookup_({ lineId: knownEarly.line_id, caseId: knownEarly.case_id }) : null;
-            var fromContactsEarly = (typeof fi_contactsLookupByEmail_ === 'function') ? fi_contactsLookupByEmail_(emailEarly) : null;
-            var candEarly = {
-              fromCases: fromCasesEarly,
-              fromContacts: fromContactsEarly,
-              fromLine: { line_id: knownEarly.line_id, user_key: ukEarly },
-              metaInMail: parsed && parsed.meta,
-            };
-            var rEarly = resolveMetaWithPriority_(candEarly, knownEarly);
-            var mEarly = rEarly && rEarly.meta || {};
-            parsed.meta = parsed.meta || {};
-            parsed.meta.user_key = parsed.meta.user_key || mEarly.user_key || ukEarly || parsed.meta.userKey || '';
-            parsed.meta.case_id  = normCaseId_(parsed.meta.case_id || parsed.meta.caseId || mEarly.case_id || knownEarly.case_id || '');
-            parsed.meta.case_key = normCaseKey_(parsed.meta.case_key || parsed.meta.caseKey || mEarly.case_key || ((parsed.meta.user_key && parsed.meta.case_id) ? (String(parsed.meta.user_key).toLowerCase() + '-' + parsed.meta.case_id) : ''));
-            parsed.meta.line_id  = parsed.meta.line_id || mEarly.line_id || knownEarly.line_id || '';
-            try { Logger.log('[Intake] adopt(by=%s,source=%s) candidates=%s', rEarly.by || '', rEarly.source || '', JSON.stringify(buildCandidates_(candEarly))); } catch (_) {}
-          } catch (_) {}
-          const fname = `intake__${meta.submission_id}.json`;
-          const blob = Utilities.newBlob(JSON.stringify(parsed, null, 2), 'application/json', fname);
-          const createdFile = staging.createFile(blob);
-          // write-through mover: 保存直後に可能ならケース直下へ移送（フォルダ未作成時は静かにスキップ）
-          try { if (typeof tryMoveIntakeToCase_ === 'function') tryMoveIntakeToCase_(parsed && parsed.meta, createdFile, fname); } catch (_) {}
-          try {
-            var candidatesEarlyJson = (function(){ try { return JSON.stringify(buildCandidates_(candEarly)); } catch(_) { return '[]'; } })();
-            Logger.log(
-              '[Intake] staged name=%s meta={lid:%s, uk:%s, cid:%s, ckey:%s} by=%s source=%s candidates=%s',
-              fname,
-              (parsed && parsed.meta && parsed.meta.line_id) || '',
-              (parsed && parsed.meta && parsed.meta.user_key) || '',
-              (parsed && parsed.meta && parsed.meta.case_id) || '',
-              (parsed && parsed.meta && parsed.meta.case_key) || '',
-              (rEarly && rEarly.by) || '',
-              (rEarly && rEarly.source) || 'unknown',
-              candidatesEarlyJson
-            );
-          } catch (_) {}
-          formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, true);
-          return;
-        }
 
         const prepared = formIntake_prepareCaseInfo_(meta, def, parsed);
         const caseInfo = prepared.caseInfo || {};
@@ -1549,101 +1596,15 @@ function run_ProcessInbox_AllForms() {
 
         const formKeyForStatus = String(parsed?.meta?.form_key || actualKey || '').trim();
 
-        // intake はケース直行せず、必ず staging へ保存（後続の status_api で吸い上げ）
-        if (formKeyForStatus === 'intake') {
-          try {
-            const P = PropertiesService.getScriptProperties();
-            const EXPECT = String(P.getProperty('NOTIFY_SECRET') || '').trim();
-            const ALLOW_NO_SECRET = (P.getProperty('ALLOW_NO_SECRET') || '').toLowerCase() === '1';
-            const provided = String((meta && meta.secret) || '').trim();
-            if (EXPECT && !ALLOW_NO_SECRET && provided !== EXPECT) {
-              try { Logger.log('[Intake] secret mismatch: meta.secret=%s', provided || '(empty)'); } catch (_) {}
-              formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, false);
-              return;
-            }
-          } catch (_) {}
-
-          if (!meta.submission_id) {
-            meta.submission_id =
-              meta.submissionId ||
-              (typeof Utilities !== 'undefined' && typeof Utilities.getUuid === 'function'
-                ? Utilities.getUuid()
-                : String(Date.now()));
-            if (!meta.submissionId) meta.submissionId = meta.submission_id;
-            parsed.meta = meta;
-          }
-
-          const P = PropertiesService.getScriptProperties();
-          const ROOT_ID = P.getProperty('DRIVE_ROOT_FOLDER_ID') || P.getProperty('ROOT_FOLDER_ID');
-          const root = DriveApp.getFolderById(ROOT_ID);
-          const it = root.getFoldersByName('_email_staging');
-          const staging = it.hasNext() ? it.next() : root.createFolder('_email_staging');
-          // line_id を多系統から抽出 → メタ補完（email抽出＋contacts逆引き）→ バリデーション（隔離）
-          var knownLineId2 = '';
-          try { knownLineId2 = getLineIdFromContext_(null /*req*/, msg, parsed) || ''; } catch (_) {}
-          var knownCaseId2 = '';
-          try { knownCaseId2 = String(meta.case_id || meta.caseId || '').replace(/\D/g, ''); } catch (_) {}
-          const email2 = (function () {
-            try { return _extractEmail_({ msg, obj: parsed, rawText: body }); } catch (_) { return ''; }
-          })();
-          try {
-            parsed = _fillMetaBeforeStage_(parsed, {
-              knownLineId: knownLineId2,
-              knownCaseId: knownCaseId2,
-              email: email2,
-            });
-          } catch (_) {}
-          if (!(email2 || (parsed && parsed.meta && parsed.meta.line_id))) {
-            try {
-              const itQ2 = root.getFoldersByName('_quarantine');
-              const qf2 = itQ2.hasNext() ? itQ2.next() : root.createFolder('_quarantine');
-              const qn2 = `raw_intake__${meta.submission_id || Date.now()}.json`;
-              qf2.createFile(
-                Utilities.newBlob(
-                  JSON.stringify({ raw: parsed, note: 'no_email_no_lineid' }),
-                  'application/json',
-                  qn2
-                )
-              );
-              Logger.log('[Intake][drop] no identifiers; quarantined %s', qn2);
-            } catch (_) {}
-            formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, true);
-            return;
-          }
-          const fname = `intake__${meta.submission_id}.json`;
-          const blob = Utilities.newBlob(JSON.stringify(parsed, null, 2), 'application/json', fname);
-          const createdFile = staging.createFile(blob);
-          // write-through mover: 保存直後に可能ならケース直下へ移送（フォルダ未作成時は静かにスキップ）
-          try { if (typeof tryMoveIntakeToCase_ === 'function') tryMoveIntakeToCase_(parsed && parsed.meta, createdFile, fname); } catch (_) {}
-          try {
-            var candidates2Json = (function(){ try { return JSON.stringify(buildCandidates_(cand2)); } catch(_) { return '[]'; } })();
-            Logger.log(
-              '[Intake] staged name=%s meta={lid:%s, uk:%s, cid:%s, ckey:%s} by=%s source=%s candidates=%s',
-              fname,
-              (parsed && parsed.meta && parsed.meta.line_id) || '',
-              (parsed && parsed.meta && parsed.meta.user_key) || '',
-              (parsed && parsed.meta && parsed.meta.case_id) || '',
-              (parsed && parsed.meta && parsed.meta.case_key) || '',
-              (r2 && r2.by) || '',
-              (r2 && r2.source) || 'unknown',
-              candidates2Json
-            );
-          } catch (_) {}
-          formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, true);
-          return;
-        }
-
-        if (formIntake_isDuplicateSubmission_(caseFolderId, actualKey, meta.submission_id)) {
+        if (formIntake_isDuplicateSubmission_(case_id, caseFolderId, actualKey, meta.submission_id)) {
           formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, true);
           return;
         }
 
         const savedFile = saveSubmissionJson_(caseFolderId, parsed);
-        const file_path = `${caseFolderId}/${savedFile.getName()}`;
-        Logger.log('[Intake] saved %s', file_path);
-
+        let placedFile = null;
         try {
-          drive_placeFileIntoCase_(
+          placedFile = drive_placeFileIntoCase_(
             savedFile,
             parsed?.meta || parsed?.META || {},
             {
@@ -1660,6 +1621,8 @@ function run_ProcessInbox_AllForms() {
         } catch (placeErr) {
           Logger.log('[Intake] placeFile error: %s', (placeErr && placeErr.stack) || placeErr);
         }
+        const file_path = formIntake_buildFilePath_(placedFile || savedFile, caseFolderId);
+        Logger.log('[Intake] saved %s', file_path);
 
         if (typeof recordSubmission_ === 'function') {
           try {
@@ -1706,37 +1669,46 @@ function run_ProcessInbox_AllForms() {
 
         formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, true);
       } catch (err) {
-        GmailApp.createDraft(
-          msg.getFrom(),
-          `[BAS Intake Error] ${def.name}`,
-          String(err),
-          { htmlBody: `<pre>${safeHtml((err && err.stack) || err)}</pre>` }
-        );
-        formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, false);
+        const defName = def && def.name ? def.name : 'unknown';
+        let errText = '';
+        try {
+          errText = String((err && err.stack) || err || '');
+        } catch (_) {
+          errText = 'unknown error';
+        }
+        let htmlBody = '';
+        try {
+          const safe = typeof safeHtml === 'function' ? safeHtml(errText) : errText;
+          htmlBody = `<pre>${safe}</pre>`;
+        } catch (_) {
+          htmlBody = `<pre>${errText}</pre>`;
+        }
+        try {
+          const draftTo = (() => {
+            try {
+              return msg.getFrom();
+            } catch (_) {
+              return 'me';
+            }
+          })();
+          GmailApp.createDraft(draftTo, `[BAS Intake Error] ${defName}`, errText, { htmlBody });
+        } catch (_) {}
+        try {
+          formIntake_markFailed_(thread, lockLabel, toProcessLabel, errorLabel);
+        } catch (_) {}
       }
     });
-  });
+    }
+  } finally {
+    try {
+      scriptLock.releaseLock();
+    } catch (_) {}
+  }
 }
 
 function formIntake_assignQueueLabels_() {
-  const query = `label:${FORM_INTAKE_LABEL_TO_PROCESS}`;
-  const threads = GmailApp.search(query, 0, 100);
-  threads.forEach(function (thread) {
-    try {
-      const messages = thread.getMessages();
-      if (!messages || !messages.length) return;
-      const msg = messages[0];
-      const body = msg.getPlainBody() || HtmlService.createHtmlOutput(msg.getBody()).getContent();
-      let meta = {};
-      try { meta = parseMetaBlock_(body) || {}; } catch (_) { meta = {}; }
-      const formKeyRaw = String(meta?.form_key || meta?.formKey || '').trim();
-      const formKey = formIntake_normalizeFormKey_(formKeyRaw, msg.getSubject(), meta);
-      const def = FORM_INTAKE_REGISTRY[formKey];
-      if (def) {
-        thread.addLabel(formIntake_labelOrCreate_(def.queueLabel));
-      }
-    } catch (_) {}
-  });
+  // フォーム別Queueラベルは使用しない
+  return;
 }
 
 function formIntake_resolveCase_(caseId, def) {
@@ -1756,21 +1728,63 @@ function formIntake_ensureCaseFolder_(caseInfo, def) {
 
 function formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, processed) {
   if (processed) {
-    thread.addLabel(processedLabel);
+    if (processedLabel) thread.addLabel(processedLabel);
     try {
-      thread.removeLabel(queueLabel);
+      if (queueLabel) thread.removeLabel(queueLabel);
     } catch (_) {}
     try {
-      thread.removeLabel(toProcessLabel);
+      if (toProcessLabel && toProcessLabel !== queueLabel) thread.removeLabel(toProcessLabel);
     } catch (_) {}
   }
   try {
-    thread.removeLabel(lockLabel);
+    if (lockLabel) thread.removeLabel(lockLabel);
   } catch (_) {}
 }
 
-function formIntake_isDuplicateSubmission_(folderId, formKey, submissionId) {
-  if (!folderId || !formKey || !submissionId) return false;
+function formIntake_markFailed_(thread, lockLabel, toProcessLabel, failedLabel) {
+  try {
+    if (failedLabel) thread.addLabel(failedLabel);
+  } catch (_) {}
+  try {
+    if (toProcessLabel) thread.removeLabel(toProcessLabel);
+  } catch (_) {}
+  try {
+    if (lockLabel) thread.removeLabel(lockLabel);
+  } catch (_) {}
+}
+
+function formIntake_buildFilePath_(file, fallbackFolderId) {
+  if (!file) return '';
+  let folderId = String(fallbackFolderId || '');
+  try {
+    const parents = file.getParents();
+    if (parents && parents.hasNext()) {
+      folderId = parents.next().getId();
+    }
+  } catch (_) {}
+  let name = '';
+  try {
+    name = file.getName();
+  } catch (_) {}
+  if (folderId && name) return `${folderId}/${name}`;
+  if (name) return name;
+  return folderId;
+}
+
+function formIntake_isDuplicateSubmission_(caseId, folderId, formKey, submissionId) {
+  if (!formKey || !submissionId) return false;
+  try {
+    const normCaseId =
+      typeof normCaseId_ === 'function'
+        ? normCaseId_(caseId)
+        : String(caseId || '').replace(/\D/g, '').padStart(4, '0');
+    if (normCaseId && typeof sheetsRepo_hasSubmission_ === 'function') {
+      if (sheetsRepo_hasSubmission_(normCaseId, formKey, submissionId)) return true;
+    }
+  } catch (e) {
+    try { Logger.log('[Intake] duplicate check (sheet) error: %s', (e && e.stack) || e); } catch (_) {}
+  }
+  if (!folderId) return false;
   try {
     const folder = DriveApp.getFolderById(folderId);
     const fname = `${formKey}__${submissionId}.json`;

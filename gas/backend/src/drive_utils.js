@@ -39,7 +39,14 @@ function drive_getOrCreatePath_(parent, path) {
 }
 
 function drive_userKeyFromLineId_(lineId) {
-  return String(lineId || '').slice(0, 6).toLowerCase();
+  const lid = String(lineId || '').trim();
+  if (!lid) return '';
+  try {
+    const hit = drive_lookupCaseRow_({ lineId: lid });
+    const userKey = hit && hit.userKey ? String(hit.userKey).trim() : '';
+    if (userKey) return userKey.toLowerCase();
+  } catch (_) {}
+  return lid.slice(0, 6).toLowerCase();
 }
 
 function drive_lookupCaseRow_(criteria) {
@@ -134,5 +141,5 @@ function drive_placeFileIntoCase_(file, meta, fallback) {
   if (!file) return;
   const caseKey = drive_resolveCaseKeyFromMeta_(meta || {}, fallback || {});
   const caseFolder = drive_getOrCreateCaseFolderByKey_(caseKey);
-  drive_moveFileToFolder_(file, caseFolder);
+  return drive_moveFileToFolder_(file, caseFolder);
 }

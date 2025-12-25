@@ -1317,7 +1317,10 @@ function processLabel(labelName) {
     const queueLabels = typeof getFormQueueLabels_ === 'function' ? getFormQueueLabels_() : [];
     const lockLabelName =
       typeof getFormLockLabel_ === 'function' ? getFormLockLabel_() : 'BAS/lock';
-    if (queueLabels.some((name) => labs.indexOf(name) >= 0) || labs.indexOf(lockLabelName) >= 0) {
+    if (
+      queueLabels.some((name) => labs.indexOf(name) >= 0) ||
+      (lockLabelName && labs.indexOf(lockLabelName) >= 0)
+    ) {
       return;
     }
     if (labs.indexOf(LABEL_PROCESSED) >= 0 || labs.indexOf(LABEL_ERROR) >= 0) {
