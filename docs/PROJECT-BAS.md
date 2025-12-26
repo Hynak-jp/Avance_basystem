@@ -138,6 +138,7 @@ BAS_提出書類（ROOT_FOLDER_ID/DRIVE_ROOT_FOLDER_ID: 15QnwkhoXUkh8gVg56R3cSX-
   - JSON: `<caseKey>/<formKey>__<submissionId>.json`（submissionId は半角数字）
   - いずれか不明（メールのみ等）の場合:
     - `_email_staging/<YYYY-MM>/<email_hash>/` または `/_staging/<YYYY-MM>/submission_<SID>/` に一時保存
+    - **intake は `line_id` が入っても `case_id` が無いので staging 扱い**
   - 後から LINE+caseId が分かった時点で、`_email_staging` から案件フォルダの `attachments/` 配下へ統合（重複は content_hash で回避）。
 
 - カテゴリ判定とファイル名
@@ -259,11 +260,12 @@ staging 吸い上げ
 - クライアント: ログイン直後に `/api/bootstrap` を 1 回叩く（冪等）
 - フォーム URL 付与: `makeFormUrl(base, lineId, caseId)`（サーバ専用）
   - 付与: `redirect_url[0]` に `lineId/caseId/ts/p/sig`（V2）を載せる
-- intake: `makeIntakeUrl(intakeBase, intakeRedirect, lineId)`（`caseId=''` で署名）
+- intake: `makeIntakeUrl(intakeBase, intakeRedirect, lineId, { lineIdQueryKeys: ['line_id[0]'] })`（`caseId=''` で署名）
 
 ### 8.3 FormMailer 側（META テンプレート）
 
 - **intake（初回受付）**: `case_id` はメール本文に存在しない前提でOK（GAS が `contacts.active_case_id` から補完して `meta.case_id` に保存する）
+  - 代わりに **hidden の `line_id` を META に出力**（URL の `line_id[0]` を受け取る）
 - **それ以外のフォーム**: 可能なら `case_id` を含める（例: フォームに hidden `case_id` を持たせ、META に書き出す）
 
 例（intake は `case_id` 無し）
@@ -273,6 +275,7 @@ staging 吸い上げ
 form_name: %%_FORM_NAME_%%
 form_key: intake
 secret: FM-BAS
+line_id: %%line_id%%
 submission_id: %%_SUBMISSION_ID_%%
 submitted_at: %%_SUBMISSION_CREATED_AT_%%
 seq: %%_SEQNUM_%%

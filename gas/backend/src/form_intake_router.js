@@ -45,6 +45,22 @@ if (typeof parseFieldsBlock_ !== 'function') {
   }
 }
 
+// _email_staging の月別/ハッシュ配下にフォルダを作成して ID を返す
+function formIntake_getOrCreateEmailStagingFolderId_(emailRaw) {
+  const root = drive_getRootFolder_();
+  const yyyymm = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM');
+  const email = String(emailRaw || '').trim().toLowerCase();
+  const hash = email
+    ? Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, email, Utilities.Charset.UTF_8)
+        .map(function (b) {
+          const v = b < 0 ? b + 256 : b;
+          return v.toString(16).padStart(2, '0');
+        })
+        .join('')
+    : 'unknown';
+  const folder = drive_getOrCreatePath_(root, ['_email_staging', yyyymm, hash].join('/'));
+  return folder.getId();
+}
 // ===== 共通マッチャ（必要なら定義）: case_key → case_id → line_id =====
 if (typeof normCaseId_ !== 'function') {
   function normCaseId_(s) {
@@ -389,6 +405,7 @@ function resolveCaseByCaseIdSmart_(caseId) {
 const FORM_INTAKE_REGISTRY = {
   intake: {
     name: '初回受付',
+    allowIssueNewCase: false,
     parser: function (subject, body) {
       if (typeof parseMetaBlock_ !== 'function') {
         throw new Error('parseMetaBlock_ is not defined');
@@ -1205,6 +1222,29 @@ function formIntake_normalizeFormKey_(rawKey, subject, meta) {
   return '';
 }
 
+function formIntake_normalizeMetaAliases_(meta) {
+  if (!meta || typeof meta !== 'object') return meta || {};
+  var map = [
+    { dst: 'line_id', srcs: ['line_id[0]', 'line_id[]', 'lineId', 'lineId[0]'] },
+    { dst: 'case_id', srcs: ['case_id[0]', 'case_id[]', 'caseId', 'caseId[0]'] },
+    { dst: 'user_key', srcs: ['user_key[0]', 'user_key[]', 'userKey', 'userKey[0]'] },
+    { dst: 'form_key', srcs: ['form_key[0]', 'form_key[]', 'formKey', 'formKey[0]'] },
+    { dst: 'submission_id', srcs: ['submission_id[0]', 'submission_id[]', 'submissionId', 'submissionId[0]'] },
+  ];
+  for (var i = 0; i < map.length; i++) {
+    var item = map[i];
+    if (meta[item.dst]) continue;
+    for (var j = 0; j < item.srcs.length; j++) {
+      var key = item.srcs[j];
+      if (meta[key]) {
+        meta[item.dst] = meta[key];
+        break;
+      }
+    }
+  }
+  return meta;
+}
+
 function formIntake_generateUserKey_(meta) {
   // intake はメールだけでは user_key を決めない（誤決定を防ぐ）
   try {
@@ -1282,6 +1322,18 @@ function formIntake_prepareCaseInfo_(meta, def, parsed) {
   if (!caseId && lineId && typeof lookupCaseIdByLineId_ === 'function') {
     caseId = formIntake_normalizeCaseId_(lookupCaseIdByLineId_(lineId));
   }
+  // case_id 未確定時の採番可否をフォーム定義に従って判定
+  const fkLow = String(metaObj.form_key || metaObj.formKey || '').trim().toLowerCase();
+  const allowIssueNewCase = !(def && def.allowIssueNewCase === false);
+  if (!caseId && (fkLow === 'intake' || !allowIssueNewCase)) {
+    return {
+      caseInfo: {},
+      caseId: '',
+      userKey: userKey || '',
+      lineId: lineId || '',
+      needsStaging: true,
+    };
+  }
   if (!caseId) {
     if (def && def.requireCaseId) {
       throw new Error('case_id is required for form_key=' + String(metaObj.form_key || ''));
@@ -1323,6 +1375,28 @@ function getFormLockLabel_() {
   return FORM_INTAKE_LABEL_LOCK;
 }
 
+// saveSubmissionJson_ が無い/失敗する場合のフォールバック保存
+function formIntake_saveSubmissionJsonFallback_(folderId, parsed, formKey, submissionId) {
+  const folder = DriveApp.getFolderById(folderId);
+  const meta = (parsed && parsed.meta) || {};
+  const fk =
+    String(formKey || meta.form_key || meta.formKey || '').trim() ||
+    String(meta.form_name || meta.formName || '').trim() ||
+    'intake';
+  const sid =
+    String(submissionId || meta.submission_id || meta.submissionId || '').trim() ||
+    (typeof Utilities !== 'undefined' && typeof Utilities.getUuid === 'function'
+      ? Utilities.getUuid()
+      : String(Date.now()));
+  const fileName = `${fk}__${sid}.json`;
+
+  const existing = folder.getFilesByName(fileName);
+  if (existing.hasNext()) return existing.next();
+
+  const blob = Utilities.newBlob(JSON.stringify(parsed || {}, null, 2), 'application/json', fileName);
+  return folder.createFile(blob);
+}
+
 function run_ProcessInbox_AllForms() {
   const scriptLock = LockService.getScriptLock();
   if (!scriptLock.tryLock(30000)) return;
@@ -1349,7 +1423,7 @@ function run_ProcessInbox_AllForms() {
           const subject = msg.getSubject();
           let metaHint = {};
           try {
-            metaHint = parseMetaBlock_(body) || {};
+            metaHint = formIntake_normalizeMetaAliases_(parseMetaBlock_(body) || {});
           } catch (_) {
             metaHint = {};
           }
@@ -1366,7 +1440,8 @@ function run_ProcessInbox_AllForms() {
           }
 
           let parsed = def.parser(subject, body);
-          let meta = parsed?.meta || {};
+          let meta = formIntake_normalizeMetaAliases_(parsed?.meta || {});
+          parsed.meta = meta;
           let actualKeyRaw = String(meta.form_key || meta.formKey || '').trim();
           let actualKey = formIntake_normalizeFormKey_(actualKeyRaw, subject, meta);
           if (actualKey && actualKey !== actualKeyRaw) {
@@ -1421,11 +1496,11 @@ function run_ProcessInbox_AllForms() {
         const caseId = prepared.caseId;
         const case_id = caseId;
         caseInfo.caseId = caseInfo.caseId || caseId;
-        if (!caseInfo.case_id) caseInfo.case_id = caseInfo.caseId;
+        if (!caseInfo.case_id && caseId) caseInfo.case_id = caseInfo.caseId;
 
         // intake（meta.case_id 無し）への採番結果を同じ参照に反映
-        if (!meta.case_id) meta.case_id = caseId;
-        if (!meta.caseId) meta.caseId = caseId;
+        if (!meta.case_id && caseId) meta.case_id = caseId;
+        if (!meta.caseId && caseId) meta.caseId = caseId;
         if (!meta.submission_id) {
           meta.submission_id =
             meta.submissionId ||
@@ -1435,6 +1510,55 @@ function run_ProcessInbox_AllForms() {
         }
         if (!meta.submissionId) meta.submissionId = meta.submission_id;
         parsed.meta = meta;
+
+        // case 未確定は staging へ保存して終了（case フォルダは作らない）
+        if (prepared.needsStaging) {
+          try {
+            if (typeof stageIntakeMail_ === 'function') {
+              const staged = stageIntakeMail_(thread, msg, parsed, meta, body) || {};
+              if (staged.rejected) {
+                formIntake_markFailed_(thread, lockLabel, toProcessLabel, rejectedLabel);
+                return;
+              }
+              if (staged.quarantined) {
+                formIntake_markFailed_(thread, lockLabel, toProcessLabel, noMetaLabel);
+                return;
+              }
+              formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, true);
+              return;
+            }
+            const stagingFolder =
+              typeof drive_getOrCreateEmailStagingFolder_ === 'function'
+                ? drive_getOrCreateEmailStagingFolder_()
+                : drive_getRootFolder_();
+            const stId = stagingFolder ? stagingFolder.getId() : drive_getRootFolder_().getId();
+            let savedFile = null;
+            try {
+              if (typeof saveSubmissionJson_ === 'function') {
+                savedFile = saveSubmissionJson_(stId, parsed);
+              } else {
+                savedFile = formIntake_saveSubmissionJsonFallback_(stId, parsed, actualKey, meta.submission_id);
+              }
+            } catch (saveErr) {
+              try {
+                Logger.log('[Intake] staging save failed: %s', (saveErr && saveErr.stack) || saveErr);
+              } catch (_) {}
+              savedFile = formIntake_saveSubmissionJsonFallback_(stId, parsed, actualKey, meta.submission_id);
+            }
+            try {
+              Logger.log(
+                '[Intake] staged to %s (%s)',
+                stagingFolder ? stagingFolder.getName() : '_email_staging',
+                savedFile && savedFile.getName && savedFile.getName()
+              );
+            } catch (_) {}
+            formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, true);
+            return;
+          } catch (_) {
+            formIntake_markFailed_(thread, lockLabel, toProcessLabel, noMetaLabel);
+            return;
+          }
+        }
 
         const fallbackInfo = {
           caseId,
@@ -1483,12 +1607,12 @@ function run_ProcessInbox_AllForms() {
         }
         if (!isValidCaseKey_(finalCaseKey)) {
           const cidFix = (typeof normCaseId_ === 'function') ? normCaseId_(caseId) : String(caseId||'').replace(/\D/g,'').padStart(4,'0');
-          // user_key 未確定の intake は line_id 起点で仮キーを作る（衝突回避）
+          // intake はここに来ない想定。フォールバック採番はしない。
           if (cidFix && formKeyForStatusEarly === 'intake') {
             const lid = caseInfo.lineId || prepared.lineId || fallbackInfo.lineId || fallbackInfo.line_id || '';
             let ukFix = lid ? formIntake_normalizeUserKey_(lid) : '';
             if (!ukFix && fallbackInfo.userKey) ukFix = formIntake_normalizeUserKey_(fallbackInfo.userKey);
-            finalCaseKey = ukFix ? `${ukFix}-${cidFix}` : `intake-${cidFix}`;
+            finalCaseKey = ukFix && cidFix ? `${ukFix}-${cidFix}` : '';
           }
         }
   if (!isValidCaseKey_(finalCaseKey)) throw new Error('Unable to resolve case folder key');
@@ -1564,7 +1688,19 @@ function run_ProcessInbox_AllForms() {
           return;
         }
 
-        const savedFile = saveSubmissionJson_(caseFolderId, parsed);
+        let savedFile = null;
+        try {
+          if (typeof saveSubmissionJson_ === 'function') {
+            savedFile = saveSubmissionJson_(caseFolderId, parsed);
+          } else {
+            savedFile = formIntake_saveSubmissionJsonFallback_(caseFolderId, parsed, actualKey, meta.submission_id);
+          }
+        } catch (saveErr) {
+          try {
+            Logger.log('[Intake] saveSubmissionJson_ failed: %s', (saveErr && saveErr.stack) || saveErr);
+          } catch (_) {}
+          savedFile = formIntake_saveSubmissionJsonFallback_(caseFolderId, parsed, actualKey, meta.submission_id);
+        }
         let placedFile = null;
         try {
           placedFile = drive_placeFileIntoCase_(

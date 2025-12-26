@@ -54,6 +54,11 @@ function stageIntakeMail_(thread, msg, parsed, meta, rawBody) {
   parsed = parsed || {};
   meta = meta || parsed.meta || {};
   parsed.meta = parsed.meta || meta || {};
+  var metaInMail = parsed.meta || {};
+  var hadLineId = !!(metaInMail.line_id || metaInMail.lineId);
+  var hadCaseId = !!(metaInMail.case_id || metaInMail.caseId);
+  var hadCaseKey = !!(metaInMail.case_key || metaInMail.caseKey);
+  var hadUserKey = !!(metaInMail.user_key || metaInMail.userKey);
 
   var props = null;
   try {
@@ -225,6 +230,27 @@ function stageIntakeMail_(thread, msg, parsed, meta, rawBody) {
         JSON.stringify(buildCandsFn(candEarly))
       );
     } catch (_) {}
+  } catch (_) {}
+
+  // メール本文に含まれていなかった識別子は staging で保持しない（誤マッチ防止）
+  try {
+    parsed.meta = parsed.meta || {};
+    if (!hadLineId) {
+      delete parsed.meta.line_id;
+      delete parsed.meta.lineId;
+    }
+    if (!hadCaseId) {
+      delete parsed.meta.case_id;
+      delete parsed.meta.caseId;
+    }
+    if (!hadCaseKey) {
+      delete parsed.meta.case_key;
+      delete parsed.meta.caseKey;
+    }
+    if (!hadUserKey) {
+      delete parsed.meta.user_key;
+      delete parsed.meta.userKey;
+    }
   } catch (_) {}
 
   var fname = 'intake__' + meta.submission_id + '.json';

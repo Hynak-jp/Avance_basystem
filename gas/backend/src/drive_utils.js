@@ -116,6 +116,12 @@ function drive_getOrCreateCaseFolderByKey_(caseKey) {
   return drive_getOrCreatePath_(root, caseKey);
 }
 
+function drive_getOrCreateEmailStagingFolder_() {
+  const root = drive_getRootFolder_();
+  const it = root.getFoldersByName('_email_staging');
+  return it.hasNext() ? it.next() : root.createFolder('_email_staging');
+}
+
 function drive_moveFileToFolder_(file, targetFolder) {
   if (!file || !targetFolder) return file;
   const fileId = typeof file === 'string' ? file : file.getId();

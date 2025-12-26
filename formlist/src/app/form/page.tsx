@@ -249,11 +249,12 @@ export default async function FormPage() {
                 formKey: f.formKey,
                 prefill: allowPrefill,
                 extraPrefill,
-                lineIdQueryKeys: [],
+                lineIdQueryKeys: ['line_id[0]'],
                 caseIdQueryKeys: ['case_id[0]'],
               })
             : makeIntakeUrl(intakeBase, redirectForForm, lineId!, {
                 formId: f.formId,
+                lineIdQueryKeys: ['line_id[0]'],
               });
       } else if (caseReady && caseId) {
         signedHref = makeFormUrl(f.baseUrl, lineId!, caseId, {

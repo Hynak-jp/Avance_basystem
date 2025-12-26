@@ -20,6 +20,7 @@
 7. 署名は **V2（HMAC）を優先**し、**±600秒**の時刻スキュー検証を通過したもののみ処理する。V1はフェイルセーフとして継続。
 8. 並行実行を避けるため、**ScriptLock(〜10秒)** ＋（必要に応じて）短命キャッシュを用いる。
 9. **通知メール（フォーム取込）は NOTIFY_SECRET を正規化比較で検証**し、ScriptLock + CacheService で競合/二重実行を避けつつ `case_key` 解決 → JSON 保存（同一ファイルは上書き）の流れを踏む。secret 不一致は `FormAttach/Rejected` へ隔離する。
+10. **intake 通知メールは `line_id` を含める**（URL の `line_id[0]` を hidden で受けて META に出力）。`case_id` は含めない。
 
 ---
 

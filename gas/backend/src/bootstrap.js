@@ -808,9 +808,15 @@ function bs_collectIntakeFromStaging_(lineId, caseId, knownFolderId /* optional 
     const root = DriveApp.getFolderById(DRIVE_ROOT_ID);
     try { logCtx_('collectStaging', { lineId, caseId: normalizedCaseId, folderId: caseFolderId }); } catch (_) {}
     ['_staging', '_email_staging'].forEach(function (name) {
-      const iter = root.getFoldersByName(name);
-      if (!iter.hasNext()) return;
-      moveAll(iter.next());
+      let folder = null;
+      try {
+        const iter = root.getFoldersByName(name);
+        folder = iter.hasNext() ? iter.next() : root.createFolder(name);
+      } catch (_) {
+        folder = null;
+      }
+      if (!folder) return;
+      moveAll(folder);
     });
   } catch (err) {
     try {
@@ -838,12 +844,22 @@ function bs_collectIntakeFromStaging_(lineId, caseId, knownFolderId /* optional 
               var cid0 = normalizedCaseId;
               var ckey0 = (ukey0 ? (ukey0 + '-') : '') + cid0; // uk 不明時は "-0001" を作らない
               var meta0 = (data0 && data0.meta) || {};
+              var fileCKey0 = String(meta0.case_key || meta0.caseKey || data0.case_key || data0.caseKey || '').trim();
+              var fileCID0 = String(meta0.case_id || meta0.caseId || data0.case_id || data0.caseId || '').trim();
+              var fileLID0 = String(meta0.line_id || meta0.lineId || data0.line_id || data0.lineId || '').trim();
               var known0 = { case_key: (ukey0 ? (ukey0 + '-' + cid0) : ''), case_id: cid0, line_id: String(lineId) };
               var res0 = (typeof matchMetaToCase_ === 'function') ? matchMetaToCase_(meta0, known0) : { ok: false };
               var matched0 = !!(res0 && res0.ok);
-              // 採用条件: 一致済み or (メタが空 かつ 直近15分内)
+              // 採用条件: 一致済み or (メタが空 かつ 直近N分内)
               var updatedAt = +(file.getLastUpdated && file.getLastUpdated());
-              var recent = Number.isFinite(updatedAt) ? (Date.now() - updatedAt <= 15 * 60 * 1000) : false;
+              var recentMinutes = 120;
+              try {
+                var v = Number(String(props_().getProperty('STAGING_RECENT_MINUTES') || '').trim());
+                if (Number.isFinite(v) && v > 0) recentMinutes = v;
+              } catch (_) {}
+              var recent = Number.isFinite(updatedAt)
+                ? (Date.now() - updatedAt <= recentMinutes * 60 * 1000)
+                : false;
               var noMeta = !(fileCKey0 || fileCID0 || fileLID0);
               if (!(matched0 || (noMeta && recent))) continue;
 
@@ -965,7 +981,7 @@ function bs_collectIntakeFromStaging_(lineId, caseId, knownFolderId /* optional 
   // 開発用: moved=0 かつ ALLOW_UNIQUE_RESCUE=1 のとき、直近5分・ユニーク1件を救済して meta を充填して書き込み
   try {
     if ((moved | 0) === 0) {
-      var allowUnique = (props_().getProperty('ALLOW_UNIQUE_RESCUE') || '').trim() === '1';
+      var allowUnique = (props_().getProperty('ALLOW_UNIQUE_RESCUE') || '1').trim() === '1';
       if (allowUnique) {
         var root = DriveApp.getFolderById(DRIVE_ROOT_ID);
         var candidates = [];
@@ -984,7 +1000,12 @@ function bs_collectIntakeFromStaging_(lineId, caseId, knownFolderId /* optional 
             }
           } catch (_) {}
         });
-        if (candidates.length === 1 && (Date.now() - candidates[0].t) <= 5 * 60 * 1000) {
+        var uniqueMinutes = 120;
+        try {
+          var uv = Number(String(props_().getProperty('UNIQUE_RESCUE_MINUTES') || '').trim());
+          if (Number.isFinite(uv) && uv > 0) uniqueMinutes = uv;
+        } catch (_) {}
+        if (candidates.length === 1 && (Date.now() - candidates[0].t) <= uniqueMinutes * 60 * 1000) {
           try {
             var rawU = '';
             var jsU = {};
