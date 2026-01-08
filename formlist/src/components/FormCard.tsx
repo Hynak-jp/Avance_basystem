@@ -98,7 +98,12 @@ export default function FormCard({
     if (!/^https?:\/\//i.test(href)) return href;
     try {
       const url = new URL(href);
-      url.searchParams.set('mail', email);
+      // FormMailer URLパラメータは「項目名[0]=初期値」がルール
+      url.searchParams.delete('mail');
+      url.searchParams.set('mail[0]', email);
+      if (url.searchParams.has('case_id[0]')) {
+        url.searchParams.delete('case_id');
+      }
       return url.toString();
     } catch {
       return href;
