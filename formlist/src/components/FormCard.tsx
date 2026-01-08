@@ -3,6 +3,7 @@
 // 注意: props はサーバー側で構築されるため、リンク可否や disabled 条件を変える場合は整合するサーバー処理を忘れず更新すること。
 import Link from 'next/link';
 import { makeProgressStore, FormStatus } from '@/lib/progressStore';
+import { useUserEmailStore, isValidEmail } from '@/lib/userEmailStore';
 import type { CaseFormStatus } from '@/hooks/useCaseFormsStatus';
 
 type Props = {
@@ -38,6 +39,8 @@ export default function FormCard({
 }: Props) {
   const progressKey = storeKey || formKey || formId;
   const store = makeProgressStore(lineId)();
+  const savedEmail = useUserEmailStore((state) => state.email);
+  const savedOwnerLineId = useUserEmailStore((state) => state.ownerLineId);
   const status: FormStatus = store.statusByForm[progressKey] || 'not_started';
   // LIFFの仕様上、URLに改行やスペースが入るとエラーになるため、encodeURIComponentでエンコードする
   // redirectUrl は送信後に戻ってくるURL（ここでは完了ページに戻す）
@@ -49,25 +52,58 @@ export default function FormCard({
     return digits.slice(-4).padStart(4, '0');
   };
   const normalizedCaseId = normalizeCaseId(caseId);
+  const intakeFormId = process.env.NEXT_PUBLIC_INTAKE_FORM_ID;
+  const isIntakeById = Boolean(intakeFormId && formId === intakeFormId);
   const isIntakeForm =
+    isIntakeById ||
     [formId, formKey, storeKey, progressKey]
       .filter((v): v is string => typeof v === 'string')
       .map((v) => v.toLowerCase())
-      .some((v) => v.includes('intake')) || title.includes('初回受付');
+      .some((v) => v.includes('intake')) ||
+    title.includes('初回受付');
   // intake は常に有効扱いにするため、外部からの disabled を無視して判定する
   const internalDisabled = isIntakeForm ? false : !!disabled;
   const fallback = internalDisabled
     ? undefined
     : (() => {
+        if (typeof window === 'undefined') return undefined;
         const url = new URL(baseUrl);
-        const redirectUrl = new URL('/done', window.location.origin);
-        redirectUrl.searchParams.set('formId', formId);
         url.searchParams.set('line_id[0]', lineId);
         url.searchParams.set('form_id', formId);
-        url.searchParams.set('redirect_url[0]', redirectUrl.toString());
+        if (!isIntakeForm) {
+          // intake は管理画面の完了リダイレクト設定を優先するため付与しない
+          const redirectUrl = new URL('/done', window.location.origin);
+          redirectUrl.searchParams.set('formId', formId);
+          url.searchParams.set('redirect_url[0]', redirectUrl.toString());
+        }
         return url.toString();
       })();
   const signedHref = hrefOverride ?? fallback;
+  const stripRedirectParam = (href: string) => {
+    if (!href) return href;
+    if (!/^https?:\/\//i.test(href)) return href;
+    try {
+      const url = new URL(href);
+      url.searchParams.delete('redirect_url');
+      url.searchParams.delete('redirect_url[0]');
+      return url.toString();
+    } catch {
+      return href;
+    }
+  };
+  const baseHref = isIntakeForm ? stripRedirectParam(signedHref ?? '') : (signedHref ?? '');
+  const appendMailParam = (href: string, email: string | null) => {
+    if (!href) return href;
+    if (!email || !isValidEmail(email)) return href;
+    if (!/^https?:\/\//i.test(href)) return href;
+    try {
+      const url = new URL(href);
+      url.searchParams.set('mail', email);
+      return url.toString();
+    } catch {
+      return href;
+    }
+  };
 
   const overrideDone = completed ?? false;
   let effectiveStatus: FormStatus = overrideDone ? 'done' : status;
@@ -160,7 +196,9 @@ export default function FormCard({
     }
   };
 
-  const linkHref = signedHref ?? '';
+  const effectiveEmail =
+    !isIntakeForm && savedOwnerLineId && savedOwnerLineId === lineId ? savedEmail : null;
+  const linkHref = appendMailParam(baseHref, effectiveEmail);
 
   return (
     <div className={containerClass}>

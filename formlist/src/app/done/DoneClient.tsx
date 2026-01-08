@@ -1,9 +1,10 @@
 'use client';
 // 役割: フォーム送信完了後にローカル進捗を更新し、/status API と同期するクライアント用完了ページ。
 // 注意: fetch は Abort 等で制御しているため、依存配列やローカルストレージ操作を変更する際は二重送信に注意。
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { makeProgressStore } from '@/lib/progressStore';
+import { useUserEmailStore, isValidEmail } from '@/lib/userEmailStore';
 
 const PENDING_STORAGE_KEY = 'formlist:pendingForm';
 const PENDING_TTL_MS = 10 * 60 * 1000;
@@ -20,6 +21,7 @@ type PendingFormInfo = {
 export default function DoneClient({ lineId }: { lineId: string }) {
   const search = useSearchParams();
   const router = useRouter();
+  const setEmailFromIntake = useUserEmailStore((state) => state.setEmailFromIntake);
   const formId = search.get('formId') || 'unknown';
   const formKeyParam = search.get('formKey') || '';
   const storeKeyParam = search.get('storeKey') || '';
@@ -29,6 +31,13 @@ export default function DoneClient({ lineId }: { lineId: string }) {
   const tsParam = search.get('ts') || '';
   const sigParam = search.get('sig') || '';
   const caseIdParam = search.get('caseId') || '';
+  const mailParam = search.get('mail');
+  const emailParam = search.get('email');
+  const rawEmailParam = mailParam || emailParam || '';
+  const hasMailParam = Boolean(mailParam || emailParam);
+  const intakeFormId = process.env.NEXT_PUBLIC_INTAKE_FORM_ID;
+  const isIntake = form === 'intake' || (intakeFormId && formId === intakeFormId);
+  const rawEmailRef = useRef<string | null>(rawEmailParam || null);
   const store = makeProgressStore(lineId)();
   const normalizeCaseId = (value: string | null | undefined) => {
     if (!value) return '';
@@ -39,10 +48,39 @@ export default function DoneClient({ lineId }: { lineId: string }) {
   const normalizedCaseIdParam = normalizeCaseId(caseIdParam);
 
   useEffect(() => {
+    if (!hasMailParam) return;
+    if (typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('mail') && !url.searchParams.has('email')) return;
+    url.searchParams.delete('mail');
+    url.searchParams.delete('email');
+    window.history.replaceState(null, '', url.toString());
+  }, [hasMailParam]);
+
+  useEffect(() => {
+    if (rawEmailParam) {
+      rawEmailRef.current = rawEmailParam;
+    }
+  }, [rawEmailParam]);
+
+  useEffect(() => {
     if (!lineId) return;
     let cancelled = false;
     const bust = Math.floor(Date.now() / 1000);
 
+    const normalizeQueryEmail = (raw: string) => raw.replace(/ /g, '+').trim();
+
+    const saveEmailFromQuery = () => {
+      const raw = rawEmailParam || rawEmailRef.current || '';
+      if (!raw) return false;
+      const normalized = normalizeQueryEmail(raw);
+      if (!normalized || !isValidEmail(normalized)) return false;
+      if (!isIntake) return false;
+      setEmailFromIntake(normalized, lineId);
+      return true;
+    };
+
+    saveEmailFromQuery();
     const readPending = (): { pending: PendingFormInfo | null; expired: boolean } => {
       if (typeof window === 'undefined') return { pending: null, expired: false };
       try {
@@ -78,8 +116,6 @@ export default function DoneClient({ lineId }: { lineId: string }) {
     };
 
     const runIntakeComplete = async (localKey: string | null | undefined) => {
-      const intakeFormId = process.env.NEXT_PUBLIC_INTAKE_FORM_ID;
-      const isIntake = form === 'intake' || (intakeFormId && formId === intakeFormId);
       if (!isIntake) return false;
       try {
         const r = await fetch('/api/intake/complete', {
@@ -291,6 +327,9 @@ export default function DoneClient({ lineId }: { lineId: string }) {
     sigParam,
     caseIdParam,
     lineId,
+    rawEmailParam,
+    setEmailFromIntake,
+    isIntake,
     router,
   ]);
 
