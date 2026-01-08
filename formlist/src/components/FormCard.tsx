@@ -100,6 +100,10 @@ export default function FormCard({
       const url = new URL(href);
       // FormMailer URLパラメータは「項目名[0]=初期値」がルール
       url.searchParams.delete('mail');
+      url.searchParams.delete('mail[0]');
+      url.searchParams.delete('メールアドレス');
+      url.searchParams.delete('メールアドレス[0]');
+      url.searchParams.set('メールアドレス[0]', email);
       url.searchParams.set('mail[0]', email);
       if (url.searchParams.has('case_id[0]')) {
         url.searchParams.delete('case_id');
