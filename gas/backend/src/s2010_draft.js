@@ -1,21 +1,29 @@
 /** ====== 設定（S2010） ====== **
  * 必要な Script Properties:
  * - BAS_MASTER_SPREADSHEET_ID : cases台帳シートのID（S2002と共通）
- * - S2010_TEMPLATE_GDOC_ID    : S2010差し込み用gdocテンプレのファイルID
+ * - S2010_TEMPLATE_FILE_ID    : S2010差し込み用テンプレのファイルID（docx/gdoc）
+ * - S2010_TPL_GDOC_ID (or S2010_TEMPLATE_GDOC_ID) : 旧gdocテンプレのファイルID（移行期間のみ）
  */
 const PROP_S2010 = PropertiesService.getScriptProperties();
 const S2010_SPREADSHEET_ID = PROP_S2010.getProperty('BAS_MASTER_SPREADSHEET_ID') || '';
-const S2010_TPL_GDOC_ID = PROP_S2010.getProperty('S2010_TEMPLATE_GDOC_ID') || '';
+const S2010_TPL_FILE_ID = PROP_S2010.getProperty('S2010_TEMPLATE_FILE_ID') || '';
+const S2010_TPL_GDOC_ID =
+  PROP_S2010.getProperty('S2010_TPL_GDOC_ID') ||
+  PROP_S2010.getProperty('S2010_TEMPLATE_GDOC_ID') ||
+  '';
 const S2010_LABEL_TO_PROCESS = 'FormAttach/ToProcess';
 const S2010_LABEL_PROCESSED = 'FormAttach/Processed';
 // S2010 の分割フォームが揃っているか判定するための form_key 接頭辞リスト（p1/p2のみ）
 const S2010_PART_PREFIXES = ['s2010_p1_', 's2010_p2_'];
 const S2010_LABEL_CACHE = {};
+const S2010_MIME_GDOC = MimeType.GOOGLE_DOCS;
+const S2010_MIME_DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const S2010_UNRESOLVED_ALLOWLIST = [];
 
-// チェック記号はS2002と統一
-const CHECKED = '☑';
+// チェック記号はテンプレ仕様に合わせる
+const CHECKED = '■';
 const UNCHECKED = '□';
-function renderCheck_(b) {
+function s2010_renderCheck_(b) {
   return b ? CHECKED : UNCHECKED;
 }
 
@@ -33,6 +41,10 @@ function s2010_labelOrCreate_(name) {
  * 受信箱から S2010 通知メールを取り込み → JSON 保存 → 必須パートが揃えば統合 JSON 保存 + ドラフト生成
  * ラベル: FormAttach/ToProcess → 処理後に FormAttach/Processed を付与
  */
+// Manual test checklist:
+// 1) ToProcess -> Processed label transition happens on success.
+// 2) P1 only does not generate draft; P1+P2 merges and generates.
+// 3) unresolved placeholders log is 0 or expected tokens.
 function run_ProcessInbox_S2010() {
   const query = `label:${S2010_LABEL_TO_PROCESS} subject:#FM-BAS subject:S2010`;
   const threads = GmailApp.search(query, 0, 50);
@@ -45,6 +57,7 @@ function run_ProcessInbox_S2010() {
 
   threads.forEach((th) => {
     th.getMessages().forEach((msg) => {
+      let processedOk = false;
       try {
         const body = msg.getPlainBody() || HtmlService.createHtmlOutput(msg.getBody()).getContent();
         const subject = msg.getSubject();
@@ -69,30 +82,31 @@ function run_ProcessInbox_S2010() {
           lineId: caseInfo.lineId || parsed.meta?.line_id || parsed.meta?.lineId || '',
           line_id: caseInfo.lineId || parsed.meta?.line_id || parsed.meta?.lineId || '',
         };
-        const resolvedCaseKey = drive_resolveCaseKeyFromMeta_(parsed.meta || {}, fallbackInfo);
-        const caseFolder = drive_getOrCreateCaseFolderByKey_(resolvedCaseKey);
-        const caseFolderId = caseFolder.getId();
+        let resolvedCaseKey = '';
+        try {
+          resolvedCaseKey = drive_resolveCaseKeyFromMeta_(parsed.meta || {}, fallbackInfo);
+        } catch (err) {
+          Logger.log('[S2010] caseKey resolve failed: %s', (err && err.message) || err);
+          return; // caseKey が取れない場合は保留（ラベルは維持）
+        }
+        const caseFolderId = s2010_resolveExistingCaseFolderId_({
+          ...caseInfo,
+          caseKey: resolvedCaseKey,
+          case_key: resolvedCaseKey,
+          caseId: fallbackInfo.caseId,
+          case_id: fallbackInfo.case_id,
+        });
+        if (!caseFolderId) {
+          Logger.log('[S2010] case folder not found. key=%s', resolvedCaseKey);
+          return; // intake前などのため、ToProcess に残しておく
+        }
         caseInfo.folderId = caseFolderId;
         caseInfo.caseKey = resolvedCaseKey;
         caseInfo.userKey = resolvedCaseKey.split('-')[0];
         caseInfo.user_key = caseInfo.userKey;
         if (!caseInfo.lineId && fallbackInfo.lineId) caseInfo.lineId = fallbackInfo.lineId;
 
-        const savedFile = saveSubmissionJson_(caseFolderId, parsed);
-        try {
-          drive_placeFileIntoCase_(savedFile, parsed.meta || {}, {
-            caseId: fallbackInfo.caseId,
-            case_id: fallbackInfo.case_id,
-            caseKey: resolvedCaseKey,
-            case_key: resolvedCaseKey,
-            userKey: caseInfo.userKey,
-            user_key: caseInfo.userKey,
-            lineId: caseInfo.lineId,
-            line_id: caseInfo.lineId,
-          });
-        } catch (err) {
-          Logger.log('[S2010] placeFile error: %s', (err && err.stack) || err);
-        }
+        saveSubmissionJson_(caseFolderId, parsed);
 
         const caseIdForProcess = fallbackInfo.caseId || parsed.meta?.case_id || parsed.meta?.caseId || '';
         const hasCaseIdForProcess = !!caseIdForProcess;
@@ -114,12 +128,20 @@ function run_ProcessInbox_S2010() {
           }
         }
 
-        if (processedLabel) msg.addLabel(processedLabel);
-        if (toProcessLabel) msg.removeLabel(toProcessLabel);
+        processedOk = true;
       } catch (e) {
-        GmailApp.createDraft('me', '[BAS Intake Error]', String(e), {
-          htmlBody: `<pre>${safeHtml(e.stack || e)}</pre>`,
-        });
+        try {
+          const alertTo = Session.getActiveUser().getEmail();
+          if (alertTo) {
+            GmailApp.createDraft(alertTo, '[BAS Intake Error]', String(e), {
+              htmlBody: `<pre>${s2010_safeHtml_(e.stack || e)}</pre>`,
+            });
+          }
+        } catch (_) {}
+      }
+      if (processedOk) {
+        if (processedLabel) th.addLabel(processedLabel);
+        if (toProcessLabel) th.removeLabel(toProcessLabel);
       }
     });
   });
@@ -129,20 +151,27 @@ function run_ProcessInbox_S2010() {
 function run_GenerateS2010DraftByCaseId(caseId) {
   const info = resolveCaseByCaseId_(caseId);
   if (!info) throw new Error(`Unknown case_id: ${caseId}`);
-  info.folderId = ensureCaseFolderId_(info);
+  info.folderId = s2010_resolveExistingCaseFolderId_(info);
+  if (!info.folderId) throw new Error(`Case folder not found for case_id: ${caseId}`);
 
-  const parsed = loadLatestFormJson_(info.folderId, 's2010_userform');
+  const parsed = s2010_loadLatestFormJson_(info.folderId, 's2010_userform');
   if (!parsed) throw new Error(`No S2010 JSON found under case folder: ${info.folderId}`);
 
   const draft = generateS2010Draft_(info, parsed);
-  updateCasesRow_(info.caseId || caseId, {
-    status: 'draft',
-    last_activity: new Date(),
-    last_draft_url: draft.draftUrl,
-  });
+  const patch = { last_activity: new Date() };
+  if (draft && draft.draftUrl) {
+    patch.status = 'draft';
+    patch.last_draft_url = draft.draftUrl;
+  }
+  if (draft && draft.docxUrl) patch.last_draft_docx_url = draft.docxUrl;
+  updateCasesRow_(info.caseId || caseId, patch);
   try {
-    Logger.log('[S2010] draft created: %s', draft.draftUrl);
+    if (draft && draft.draftUrl) Logger.log('[S2010] draft created: %s', draft.draftUrl);
+    if (draft) {
+      Logger.log('[S2010] draft urls: gdoc=%s docx=%s unresolved=%s', draft.draftUrl || '', draft.docxUrl || '', draft.unresolvedCount || 0);
+    }
   } catch (_) {}
+  s2010_logDraftSmoke_(draft);
   return draft;
 }
 
@@ -150,9 +179,10 @@ function run_GenerateS2010DraftByCaseId(caseId) {
 function run_GenerateS2010MergedJsonByCaseId(caseId) {
   const info = resolveCaseByCaseId_(caseId);
   if (!info) throw new Error(`Unknown case_id: ${caseId}`);
-  info.folderId = ensureCaseFolderId_(info);
+  info.folderId = s2010_resolveExistingCaseFolderId_(info);
+  if (!info.folderId) throw new Error(`Case folder not found for case_id: ${caseId}`);
 
-  const parts = loadLatestPartsByPrefix_(info.folderId, 's2010_');
+  const parts = s2010_loadLatestPartsByPrefix_(info.folderId, 's2010_');
   const requiredParts = sortS2010PartsByPrefixes_(
     filterS2010PartsByPrefixes_(parts, S2010_PART_PREFIXES),
     S2010_PART_PREFIXES
@@ -163,15 +193,21 @@ function run_GenerateS2010MergedJsonByCaseId(caseId) {
     throw new Error('Not all required S2010 parts are present yet.');
   }
 
-  const merged = mergeS2010Parts_(requiredParts, { caseId: info.caseId });
-  const fname = `s2010_userform__merged_${merged.meta.merged_at}.json`;
-  DriveApp.getFolderById(info.folderId).createFile(
-    Utilities.newBlob(JSON.stringify(merged, null, 2), 'application/json', fname)
-  );
-
-  try {
-    Logger.log('[S2010] merged json saved: %s', fname);
-  } catch (_) {}
+  const draftKey = s2010_makeDraftKeyFromParts_(requiredParts);
+  const merged = mergeS2010Parts_(requiredParts, { caseId: info.caseId, draftKey: draftKey });
+  const fname = `s2010_userform__merged_${draftKey}.json`;
+  const parent = DriveApp.getFolderById(info.folderId);
+  const existing = s2010_findFileByName_(parent, fname);
+  if (!existing) {
+    parent.createFile(Utilities.newBlob(JSON.stringify(merged, null, 2), 'application/json', fname));
+    try {
+      Logger.log('[S2010] merged json saved: %s', fname);
+    } catch (_) {}
+  } else {
+    try {
+      Logger.log('[S2010] merged json exists: %s', fname);
+    } catch (_) {}
+  }
   return merged;
 }
 
@@ -180,15 +216,33 @@ function debug_GenerateS2010_for_0001() {
   return run_GenerateS2010DraftByCaseId('0001');
 }
 
+function s2010_logDraftSmoke_(draft) {
+  const draftUrl = (draft && draft.draftUrl) || '';
+  const docxUrl = (draft && draft.docxUrl) || '';
+  const unresolved = Array.isArray(draft && draft.unresolvedKeys) ? draft.unresolvedKeys : [];
+  const allow = Array.isArray(S2010_UNRESOLVED_ALLOWLIST) ? S2010_UNRESOLVED_ALLOWLIST : [];
+  const blocked = unresolved.filter((key) => !allow.includes(key));
+  try {
+    Logger.log('[S2010][smoke] draftUrl=%s docxUrl=%s', draftUrl, docxUrl);
+    Logger.log('[S2010][smoke] urls_ok=%s', !!draftUrl && !!docxUrl);
+    Logger.log('[S2010][smoke] unresolved=%s blocked=%s', unresolved.length, blocked.length);
+    if (blocked.length) {
+      const head = blocked.slice(0, 20).join(', ');
+      Logger.log('[S2010][smoke] unresolved list (%s): %s', blocked.length, head);
+    }
+  } catch (_) {}
+}
+
 /** ===== マルチフォーム統合 → ドラフト生成（入口） ===== */
 function run_GenerateS2010DraftMergedByCaseId(caseId) {
   // 1) cases解決 & フォルダ解決
   const info = resolveCaseByCaseId_(caseId);
   if (!info) throw new Error(`Unknown case_id: ${caseId}`);
-  info.folderId = ensureCaseFolderId_(info);
+  info.folderId = s2010_resolveExistingCaseFolderId_(info);
+  if (!info.folderId) throw new Error(`Case folder not found for case_id: ${caseId}`);
 
   // 2) ケース直下から最新の各partを収集
-  const parts = loadLatestPartsByPrefix_(info.folderId, 's2010_'); // s2010_ で始まるform_keyを全部拾う
+  const parts = s2010_loadLatestPartsByPrefix_(info.folderId, 's2010_'); // s2010_ で始まるform_keyを全部拾う
   const requiredParts = sortS2010PartsByPrefixes_(
     filterS2010PartsByPrefixes_(parts, S2010_PART_PREFIXES),
     S2010_PART_PREFIXES
@@ -196,30 +250,41 @@ function run_GenerateS2010DraftMergedByCaseId(caseId) {
   if (!requiredParts.length) throw new Error('No required S2010 part-jsons found.');
 
   // 3) マージして統合JSONを作る
-  const merged = mergeS2010Parts_(requiredParts, { caseId: info.caseId }); // { meta, fieldsRaw, model }
+  const draftKey = s2010_makeDraftKeyFromParts_(requiredParts);
+  const merged = mergeS2010Parts_(requiredParts, { caseId: info.caseId, draftKey: draftKey }); // { meta, fieldsRaw, model }
 
   // 4) 統合JSONをケース直下に保存（監査用）
-  const mergedName = `s2010_userform__merged_${merged.meta.merged_at}.json`;
-  DriveApp.getFolderById(info.folderId)
-    .createFile(Utilities.newBlob(JSON.stringify(merged, null, 2), 'application/json', mergedName));
+  const mergedName = `s2010_userform__merged_${draftKey}.json`;
+  const parent = DriveApp.getFolderById(info.folderId);
+  if (!s2010_findFileByName_(parent, mergedName)) {
+    parent.createFile(Utilities.newBlob(JSON.stringify(merged, null, 2), 'application/json', mergedName));
+  }
 
   // 5) 既存のS2010生成器でドラフト化
   const draft = generateS2010Draft_(info, merged);
 
   // 6) ステータス更新
-  updateCasesRow_(info.caseId || caseId, {
-    status: 'draft',
-    last_activity: new Date(),
-    last_draft_url: draft.draftUrl,
-  });
+  const patch = { last_activity: new Date() };
+  if (draft && draft.draftUrl) {
+    patch.status = 'draft';
+    patch.last_draft_url = draft.draftUrl;
+  }
+  if (draft && draft.docxUrl) patch.last_draft_docx_url = draft.docxUrl;
+  updateCasesRow_(info.caseId || caseId, patch);
 
-  try { Logger.log('[S2010] merged draft created: %s', draft.draftUrl); } catch (_){ }
+  try {
+    if (draft && draft.draftUrl) Logger.log('[S2010] merged draft created: %s', draft.draftUrl);
+    if (draft) {
+      Logger.log('[S2010] merged draft urls: gdoc=%s docx=%s unresolved=%s', draft.draftUrl || '', draft.docxUrl || '', draft.unresolvedCount || 0);
+    }
+  } catch (_){ }
+  s2010_logDraftSmoke_(draft);
   return draft;
 }
 
 /** ===== ケース直下から "prefix" に合う form_key の最新を集める ===== */
-function loadLatestPartsByPrefix_(caseFolderId, prefix) {
-  const id = normalizeFolderId_(caseFolderId);
+function s2010_loadLatestPartsByPrefix_(caseFolderId, prefix) {
+  const id = s2010_normalizeFolderId_(caseFolderId);
   const folder = DriveApp.getFolderById(id);
 
   // form_key => {json, t}（最新のみ保持）
@@ -281,7 +346,7 @@ function mergeS2010Parts_(parts, opt) {
   const meta_list = [];
   parts.forEach(p => {
     const j = p.json || {};
-    const arr = normalizeFieldsArrayForAny_(j); // 既存の正規化
+    const arr = s2010_normalizeFieldsArrayForAny_(j); // 既存の正規化
     if (arr && arr.length) arrays.push(arr);
     meta_list.push({
       form_key: (j.meta && j.meta.form_key) || p.form_key,
@@ -290,21 +355,24 @@ function mergeS2010Parts_(parts, opt) {
     });
   });
 
-  // 2) ラベル単位でマージ（後勝ち or 非空優先）。ここは「後勝ち＋非空」でシンプルに。
-  const mergedMap = new Map(); // label -> value
+  // 2) fieldsRawは潰さず連結（後勝ち互換は検索側で担保）
+  const fieldsRaw = [];
   arrays.forEach(arr => {
     arr.forEach(({label, value}) => {
       const v = String(value || '').trim();
-      if (!v) return;                 // 空は無視（既存値を消さない）
-      mergedMap.set(label, v);        // 同一ラベルは後から来た値で上書き
+      if (!v) return; // 空は無視（既存値を消さない）
+      fieldsRaw.push({ label, value: v });
     });
   });
 
-  // 3) fieldsRawを配列化（元の順序にこだわらない場合はMap→配列でOK）
-  const fieldsRaw = Array.from(mergedMap.entries()).map(([label, value]) => ({ label, value }));
-
-  // 4) S2010のモデリングへ
+  // 3) S2010のモデリングへ
   const model = mapFieldsToModel_S2010_(fieldsRaw); // 既存のS2010マッパ
+  const p1Model = s2010_pickP1Model_(parts);
+  if (p1Model) {
+    ['jobs', 'marital_events', 'household', 'inheritances', 'housing'].forEach((k) => {
+      if (p1Model[k]) model[k] = p1Model[k];
+    });
+  }
 
   // 5) 統合メタ
   const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMddHHmmss');
@@ -312,7 +380,8 @@ function mergeS2010Parts_(parts, opt) {
     form_key: 's2010_userform',
     merged_at: now,
     merged_from: meta_list,
-    case_id: (opt && opt.caseId) || ''
+    case_id: (opt && opt.caseId) || '',
+    draft_key: (opt && opt.draftKey) || ''
   };
 
   return { meta, fieldsRaw, model };
@@ -342,8 +411,8 @@ function haveAllPartsS2010_(caseFolderId, prefixes) {
 
 /** ====== ローダ（ケース直下 .json を form_key で選別） ====== **/
 
-function loadLatestFormJson_(caseFolderId, wantFormKey) {
-  const id = normalizeFolderId_(caseFolderId);
+function s2010_loadLatestFormJson_(caseFolderId, wantFormKey) {
+  const id = s2010_normalizeFolderId_(caseFolderId);
   if (!id) throw new Error('[S2010] cases.folderId is empty.');
   let parent;
   try {
@@ -372,7 +441,7 @@ function loadLatestFormJson_(caseFolderId, wantFormKey) {
 
   if (latest.model && latest.meta) return latest;
 
-  const fieldsArr = normalizeFieldsArrayForAny_(latest);
+  const fieldsArr = s2010_normalizeFieldsArrayForAny_(latest);
   if (!fieldsArr) throw new Error('Invalid submission JSON shape (no fields/model)');
   return {
     meta: latest.meta || {},
@@ -381,14 +450,14 @@ function loadLatestFormJson_(caseFolderId, wantFormKey) {
   };
 }
 
-function normalizeFolderId_(v) {
+function s2010_normalizeFolderId_(v) {
   const s = String(v || '').trim();
   if (!s) return '';
   const m = s.match(/[-\w]{25,}/);
   return m ? m[0] : s;
 }
 
-function normalizeFieldsArrayForAny_(json) {
+function s2010_normalizeFieldsArrayForAny_(json) {
   if (!json || typeof json !== 'object') return null;
   if (Array.isArray(json.fieldsRaw)) return json.fieldsRaw;
   const f = json.fields;
@@ -413,13 +482,13 @@ function mapFieldsToModel_S2010_(fields) {
   // 基本系（S2002同様のラベル拾い・必要最小限）
   fields.forEach(({ label, value }) => {
     if (/^【?名前（ふりがな）】?/.test(label)) {
-      const { name, kana } = parseNameKanaValue_(value);
-      out.app.name = normSpace_(name);
+      const { name, kana } = s2010_parseNameKanaValue_(value);
+      out.app.name = s2010_normSpace_(name);
       out.app.kana = kana;
       return;
     }
     if (/^【?名前】?$/.test(label)) {
-      out.app.name = normSpace_(value);
+      out.app.name = s2010_normSpace_(value);
       return;
     }
     if (/^【?メールアドレス】?/.test(label)) {
@@ -427,7 +496,7 @@ function mapFieldsToModel_S2010_(fields) {
       return;
     }
     if (/^【?連絡先】?/.test(label)) {
-      out.app.phone = normPhone_(value);
+      out.app.phone = s2010_normPhone_(value);
       return;
     }
     if (/^【?生年月日】?/.test(label)) {
@@ -435,11 +504,11 @@ function mapFieldsToModel_S2010_(fields) {
       return;
     }
     if (/^【?住居所（住民票と異なる[^】]*）】?$/.test(label)) {
-      out.addr.alt_full = normJaSpace_(value);
+      out.addr.alt_full = s2010_normJaSpace_(value);
       return;
     }
     if (/^【?住居所】?/.test(label)) {
-      out.addr.full = normJaSpace_(value);
+      out.addr.full = s2010_normJaSpace_(value);
       return;
     }
   });
@@ -479,10 +548,10 @@ function mapFieldsToModel_S2010_(fields) {
 
   // 後処理（年齢・和暦）
   if (out.app && out.app.birth) {
-    const iso = toIsoBirth_(out.app.birth);
+    const iso = s2010_toIsoBirth_(out.app.birth);
     out.app.birth_iso = iso;
-    out.app.age = iso ? calcAge_(iso) : '';
-    const w = toWareki_(iso);
+    out.app.age = iso ? s2010_calcAge_(iso) : '';
+    const w = s2010_toWareki_(iso);
     if (w) out.app.birth_wareki = w;
   }
 
@@ -508,53 +577,53 @@ function ensureS2010Model_(m) {
   }
 
   // 理由（複数選択想定）
-  const reasonsRaw = findFieldValue_(m, /理由は.*とおり|借金.*理由/);
-  const reasons = splitMulti_(reasonsRaw);
+  const reasonsRaw = s2010_findFieldValue_(m, /理由は.*とおり|借金.*理由/);
+  const reasons = s2010_splitMulti_(reasonsRaw);
   out.reason = {
-    living: hasAny_(reasons, /生活費/),
-    mortgage: hasAny_(reasons, /住宅ローン|住宅/),
-    education: hasAny_(reasons, /教育/),
-    waste: hasAny_(reasons, /浪費|飲食|飲酒|投資|投機|商品購入|ギャンブル/),
-    business: hasAny_(reasons, /事業|経営破綻|マルチ|ネットワーク/),
-    guarantee: hasAny_(reasons, /保証/),
-    other: hasAny_(reasons, /その他/),
-    other_text: pickOtherText_(reasonsRaw),
+    living: s2010_hasAny_(reasons, /生活費/),
+    mortgage: s2010_hasAny_(reasons, /住宅ローン|住宅/),
+    education: s2010_hasAny_(reasons, /教育/),
+    waste: s2010_hasAny_(reasons, /浪費|飲食|飲酒|投資|投機|商品購入|ギャンブル/),
+    business: s2010_hasAny_(reasons, /事業|経営破綻|マルチ|ネットワーク/),
+    guarantee: s2010_hasAny_(reasons, /保証/),
+    other: s2010_hasAny_(reasons, /その他/),
+    other_text: s2010_pickOtherText_(reasonsRaw),
   };
 
   // きっかけ（複数選択想定）
-  const triggersRaw = findFieldValue_(m, /きっかけ.*とおり|返済.*できなく.*きっかけ/);
-  const triggers = splitMulti_(triggersRaw);
+  const triggersRaw = s2010_findFieldValue_(m, /きっかけ.*とおり|返済.*できなく.*きっかけ/);
+  const triggers = s2010_splitMulti_(triggersRaw);
   out.trigger = {
-    overpay: hasAny_(triggers, /収入以上|返済金額/),
-    dismiss: hasAny_(triggers, /解雇/),
-    paycut: hasAny_(triggers, /減額/),
-    hospital: hasAny_(triggers, /病気|入院/),
-    other: hasAny_(triggers, /その他/),
-    other_text: pickOtherText_(triggersRaw),
+    overpay: s2010_hasAny_(triggers, /収入以上|返済金額/),
+    dismiss: s2010_hasAny_(triggers, /解雇/),
+    paycut: s2010_hasAny_(triggers, /減額/),
+    hospital: s2010_hasAny_(triggers, /病気|入院/),
+    other: s2010_hasAny_(triggers, /その他/),
+    other_text: s2010_pickOtherText_(triggersRaw),
   };
 
   // 支払不能の時期・約定返済合計・受任日（任意）
-  const unable = findFieldValue_(m, /支払不能.*時期/);
-  const unableYM = toYMP_(unable);
+  const unable = s2010_findFieldValue_(m, /支払不能.*時期/);
+  const unableYM = s2010_toYMP_(unable);
   out.unable_yyyy = unableYM.yyyy || '';
   out.unable_mm = unableYM.mm || '';
-  const monthly = findFieldValue_(m, /約定返済額|月々.*返済額/);
-  out.unable_monthly_total = toNumberText_(monthly);
+  const monthly = s2010_findFieldValue_(m, /約定返済額|月々.*返済額/);
+  out.unable_monthly_total = s2010_toNumberText_(monthly);
 
-  const notice = findFieldValue_(m, /受任通知.*発送日/);
-  const nd = toYMD_(notice);
+  const notice = s2010_findFieldValue_(m, /受任通知.*発送日/);
+  const nd = s2010_toYMD_(notice);
   out.notice_yyyy = nd.yyyy || '';
   out.notice_mm = nd.mm || '';
   out.notice_dd = nd.dd || '';
 
   // ===== 職歴1（開始は常に入力あり。終了/現在は入力無しでもOK。無職でも開始だけ出す） =====
-  const companyRaw = findFieldValue_(m, /職歴1.*(就業先|会社名|勤務先)/);
-  const kindRaw = findFieldValue_(m, /職歴1.*種\s*別|種\s*別/);
-  const monthlyRaw = findFieldValue_(
+  const companyRaw = s2010_findFieldValue_(m, /職歴1.*(就業先|会社名|勤務先)/);
+  const kindRaw = s2010_findFieldValue_(m, /職歴1.*種\s*別|種\s*別/);
+  const monthlyRaw = s2010_findFieldValue_(
     m,
     /職歴1.*平均月収(\s*[（(]円[）)]\s*)?|平均月収(\s*[（(]円[）)]\s*)?/
   );
-  const severanceRaw = findFieldValue_(m, /職歴1.*退職金.*有|退職金.*有/);
+  const severanceRaw = s2010_findFieldValue_(m, /職歴1.*退職金.*有|退職金.*有/);
 
   const kind = String(kindRaw || '');
   const kindFlags = {
@@ -566,15 +635,15 @@ function ensureS2010Model_(m) {
   };
 
   // 開始は常に拾う（「職歴1：開始」「職歴1：就業開始」「無職開始」など許容）
-  const startRaw = findFieldValue_(
+  const startRaw = s2010_findFieldValue_(
     m,
     /職歴1[:：]?\s*(開始|就業開始|無職開始)|就業期間.*開始|職歴.*1.*開始/
   );
-  const endRaw = findFieldValue_(m, /職歴1[:：]?\s*(就業終了|終了)|就業期間.*終了|職歴.*1.*終了/);
-  const curRaw = findFieldValue_(m, /職歴1[:：]?\s*現\s*在|職歴1.*現在|現在就業中/);
+  const endRaw = s2010_findFieldValue_(m, /職歴1[:：]?\s*(就業終了|終了)|就業期間.*終了|職歴.*1.*終了/);
+  const curRaw = s2010_findFieldValue_(m, /職歴1[:：]?\s*現\s*在|職歴1.*現在|現在就業中/);
 
-  const fromYMD = toYMD_(startRaw); // {yyyy,mm,dd}
-  const toYMDv = toYMD_(endRaw); // {yyyy,mm,dd}
+  const fromYMD = s2010_toYMD_(startRaw); // {yyyy,mm,dd}
+  const toYMDv = s2010_toYMD_(endRaw); // {yyyy,mm,dd}
 
   let isCurrent =
     /はい|現.?在/i.test(String(curRaw || '')) || !endRaw || /現.?在/.test(String(endRaw || ''));
@@ -588,10 +657,10 @@ function ensureS2010Model_(m) {
 
   const pad2 = (s) => (s ? String(s).padStart(2, '0') : '');
   out.jobs1 = {
-    company: normJaSpace_(companyRaw || ''),
+    company: s2010_normJaSpace_(companyRaw || ''),
     kind: kindFlags,
-    avg_monthly: kindFlags.unemployed ? '' : toNumberText_(monthlyRaw),
-    severance: toBoolJaLoose_(severanceRaw),
+    avg_monthly: kindFlags.unemployed ? '' : s2010_toNumberText_(monthlyRaw),
+    severance: s2010_toBoolJaLoose_(severanceRaw),
 
     from_yyyy: fromYMD.yyyy || '',
     from_mm: pad2(fromYMD.mm || ''),
@@ -607,144 +676,760 @@ function ensureS2010Model_(m) {
     ? `${out.jobs1.end_yyyy}年${out.jobs1.end_mm}月`
     : '';
 
+  const p1Jobs = Array.isArray(m.jobs) ? m.jobs : [];
+  if (p1Jobs.length) {
+    out.jobs1 = s2010_buildJobFromP1_(p1Jobs[0]);
+  }
+  const p1Household = Array.isArray(m.household) ? m.household : [];
+  if (p1Household.length) {
+    out.hh = s2010_buildHouseholdFromP1_(p1Household);
+  }
+
   return out;
 }
 
 /** ====== ドラフト生成（S2010） ====== **/
 function generateS2010Draft_(caseInfo, parsed) {
-  if (!S2010_TPL_GDOC_ID) throw new Error('S2010_TEMPLATE_GDOC_ID not set');
+  const templateId = s2010_getTemplateFileId_();
+  if (!templateId) {
+    Logger.log('[S2010] S2010_TEMPLATE_FILE_ID is not set. draft skipped.');
+    return { gdocId: '', draftUrl: '', docxId: '', docxUrl: '' };
+  }
   const drafts = getOrCreateSubfolder_(DriveApp.getFolderById(caseInfo.folderId), 'drafts');
 
+  const caseId = caseInfo.caseId || caseInfo.case_id || 'unknown';
   const subId =
-    parsed.meta?.submission_id ||
+    (parsed.meta && (parsed.meta.draft_key || parsed.meta.submission_id)) ||
     Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMddHHmmss');
-  const draftName = `S2010_${caseInfo.caseId}_draft_${subId}`;
-  const gdocId = DriveApp.getFileById(S2010_TPL_GDOC_ID).makeCopy(draftName, drafts).getId();
+  const logCtx = `caseId=${caseId} draftKey=${subId}`;
+  const draftName = `S2010_${caseId}_draft_${subId}`;
+  const buildExisting = (gdocFile) => {
+    let unresolved = [];
+    try {
+      const existingDoc = DocumentApp.openById(gdocFile.getId());
+      unresolved = s2010_findUnresolvedPlaceholders_(existingDoc);
+      if (unresolved.length) {
+        const head = unresolved.slice(0, 20).join(', ');
+        Logger.log('[S2010] unresolved placeholders (%s) %s: %s', unresolved.length, logCtx, head);
+      }
+      existingDoc.saveAndClose();
+    } catch (_) {}
+    const docx = s2010_exportDocxFromGdoc_(gdocFile.getId(), draftName, drafts);
+    return {
+      gdocId: gdocFile.getId(),
+      draftUrl: gdocFile.getUrl(),
+      docxId: docx.docxId,
+      docxUrl: docx.docxUrl,
+      unresolvedCount: unresolved.length,
+      unresolvedKeys: unresolved,
+    };
+  };
 
-  const doc = DocumentApp.openById(gdocId);
-  const body = doc.getBody();
-  const M = ensureS2010Model_({
-    ...(parsed.model || {}),
-    fieldsRaw: parsed.fieldsRaw || [],
-  });
-
-  // 基本情報（テンプレに置いてあれば出ます）
-  replaceAll_(body, '{{app.name}}', M.app.name || '');
-  replaceAll_(body, '{{app.kana}}', M.app.kana || '');
-  if (M.app.birth_iso) {
-    const [yy, mm, dd] = M.app.birth_iso.split('-');
-    replaceAll_(body, '{{app.birth_yyyy}}', yy || '');
-    replaceAll_(body, '{{app.birth_mm}}', String(mm || ''));
-    replaceAll_(body, '{{app.birth_dd}}', String(dd || ''));
-  }
-  const w = M.app.birth_wareki || null;
-  replaceAll_(body, '{{app.birth_wareki_gengo}}', (w && w.gengo) || '');
-  replaceAll_(body, '{{app.birth_wareki_yy}}', (w && String(w.yy)) || '');
-  replaceAll_(body, '{{app.age}}', (M.app.age ?? '') + '');
-  replaceAll_(body, '{{addr.full}}', normJaSpace_(M.addr.full || ''));
-  replaceAll_(body, '{{addr.alt_full}}', normJaSpace_(M.addr.alt_full || ''));
-  replaceAll_(body, '{{stmt.free}}', (M.stmt.free || '').trim());
-
-  for (let i = 1; i <= 4; i++) {
-    const h = (M.hh && M.hh[i - 1]) || {};
-    replaceAll_(body, `{{hh${i}.name}}`, h.name || '');
-    replaceAll_(body, `{{hh${i}.relation}}`, h.relation || '');
-    replaceAll_(body, `{{hh${i}.age}}`, h.age || '');
-    replaceAll_(body, `{{hh${i}.occupation}}`, h.occupation || '');
-    replaceAll_(body, `{{hh${i}.avg_monthly}}`, h.income || '');
-    replaceAll_(body, `{{chk.hh${i}.cohab}}`, renderCheck_(h.cohab === true));
-    replaceAll_(body, `{{chk.hh${i}.separate}}`, renderCheck_(h.cohab === false));
+  const existingGdoc = s2010_findFileByName_(drafts, draftName);
+  if (existingGdoc) {
+    return buildExisting(existingGdoc);
   }
 
-  // 第2-1 理由
-  replaceAll_(body, '{{chk.reason.living}}', renderCheck_(!!M.reason?.living));
-  replaceAll_(body, '{{chk.reason.mortgage}}', renderCheck_(!!M.reason?.mortgage));
-  replaceAll_(body, '{{chk.reason.education}}', renderCheck_(!!M.reason?.education));
-  replaceAll_(body, '{{chk.reason.waste}}', renderCheck_(!!M.reason?.waste));
-  replaceAll_(body, '{{chk.reason.business}}', renderCheck_(!!M.reason?.business));
-  replaceAll_(body, '{{chk.reason.guarantee}}', renderCheck_(!!M.reason?.guarantee));
-  replaceAll_(body, '{{chk.reason.other}}', renderCheck_(!!M.reason?.other));
-  replaceAll_(body, '{{reason.other_text}}', M.reason?.other_text || '');
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+  } catch (e) {
+    Logger.log('[S2010] lock wait failed: %s', (e && e.message) || e);
+    return { gdocId: '', draftUrl: '', docxId: '', docxUrl: '' };
+  }
 
-  // 第2-2 きっかけ
-  replaceAll_(body, '{{chk.trigger.overpay}}', renderCheck_(!!M.trigger?.overpay));
-  replaceAll_(body, '{{chk.trigger.dismiss}}', renderCheck_(!!M.trigger?.dismiss));
-  replaceAll_(body, '{{chk.trigger.paycut}}', renderCheck_(!!M.trigger?.paycut));
-  replaceAll_(body, '{{chk.trigger.hospital}}', renderCheck_(!!M.trigger?.hospital));
-  replaceAll_(body, '{{chk.trigger.other}}', renderCheck_(!!M.trigger?.other));
-  replaceAll_(body, '{{trigger.other_text}}', M.trigger?.other_text || '');
+  try {
+    const existingAfterLock = s2010_findFileByName_(drafts, draftName);
+    if (existingAfterLock) {
+      return buildExisting(existingAfterLock);
+    }
 
-  // 支払不能時期・受任・金額
-  replaceAll_(body, '{{unable_yyyy}}', M.unable_yyyy || '');
-  replaceAll_(body, '{{unable_mm}}', M.unable_mm || '');
-  replaceAll_(body, '{{unable_monthly_total}}', M.unable_monthly_total || '');
-  replaceAll_(body, '{{notice_yyyy}}', M.notice_yyyy || '');
-  replaceAll_(body, '{{notice_mm}}', M.notice_mm || '');
-  replaceAll_(body, '{{notice_dd}}', M.notice_dd || '');
+    const gdocId = s2010_copyTemplateToDrafts_(templateId, draftName, drafts);
+    const doc = DocumentApp.openById(gdocId);
+    const M = ensureS2010Model_({
+      ...(parsed.model || {}),
+      fieldsRaw: parsed.fieldsRaw || [],
+    });
 
-  // 第1-1 職歴1（上段1ブロック）
-  replaceAll_(body, '{{jobs1.from_yyyy}}', M.jobs1?.from_yyyy || '');
-  replaceAll_(body, '{{jobs1.from_mm}}', M.jobs1?.from_mm || '');
-  replaceAll_(body, '{{jobs1.from_dd}}', M.jobs1?.from_dd || ''); // テンプレに置いた場合だけ出る
-  replaceAll_(body, '{{jobs1.end_text}}', M.jobs1?.end_text || '');
-  replaceAll_(body, '{{jobs1.company}}', M.jobs1?.company || '');
-  replaceAll_(body, '{{jobs1.avg_monthly}}', M.jobs1?.avg_monthly || '');
-  replaceAll_(body, '{{chk.jobs1.severance}}', renderCheck_(!!M.jobs1?.severance));
+    const placeholderMap = s2010_buildS2010PlaceholderMap_(M, parsed, logCtx);
+    try {
+      Logger.log('[S2010] placeholder keys=%s %s', Object.keys(placeholderMap || {}).length, logCtx);
+    } catch (_) {}
+    s2010_applyS2010Placeholders_(doc, placeholderMap);
 
-  replaceAll_(body, '{{chk.jobs1.kind.employee}}', renderCheck_(!!M.jobs1?.kind?.employee));
-  replaceAll_(body, '{{chk.jobs1.kind.part}}', renderCheck_(!!M.jobs1?.kind?.part));
-  replaceAll_(body, '{{chk.jobs1.kind.self}}', renderCheck_(!!M.jobs1?.kind?.self));
-  replaceAll_(
-    body,
-    '{{chk.jobs1.kind.representative}}',
-    renderCheck_(!!M.jobs1?.kind?.representative)
-  );
-  replaceAll_(body, '{{chk.jobs1.kind.unemployed}}', renderCheck_(!!M.jobs1?.kind?.unemployed));
+    const unresolved = s2010_findUnresolvedPlaceholders_(doc);
+    if (unresolved.length) {
+      const head = unresolved.slice(0, 20).join(', ');
+      Logger.log('[S2010] unresolved placeholders (%s) %s: %s', unresolved.length, logCtx, head);
+      try {
+        Logger.log('[S2010] unresolved debug keys=%s %s: %s', Object.keys(placeholderMap || {}).length, logCtx, head);
+      } catch (_) {}
+    }
 
-  doc.saveAndClose();
-  return { gdocId, draftUrl: doc.getUrl() };
+    doc.saveAndClose();
+    const docx = s2010_exportDocxFromGdoc_(gdocId, draftName, drafts);
+    const draftUrl = DriveApp.getFileById(gdocId).getUrl();
+    const docxUrl = docx.docxId ? DriveApp.getFileById(docx.docxId).getUrl() : docx.docxUrl;
+    return {
+      gdocId,
+      draftUrl,
+      docxId: docx.docxId,
+      docxUrl,
+      unresolvedCount: unresolved.length,
+      unresolvedKeys: unresolved,
+    };
+  } finally {
+    try {
+      lock.releaseLock();
+    } catch (_) {}
+  }
 }
 
 /** ====== ヘルパ群（共通が無い場合のみ使われます） ====== **/
 
-// すでにS2002側に同名があるなら、そちらが使われます（同実装）。
-function replaceAll_(body, token, value) {
-  const safe = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  body.replaceText(safe, String(value ?? ''));
+function s2010_getTemplateFileId_() {
+  if (S2010_TPL_FILE_ID) return S2010_TPL_FILE_ID;
+  if (S2010_TPL_GDOC_ID) {
+    try {
+      Logger.log('[S2010] using legacy template id (S2010_TPL_GDOC_ID)');
+    } catch (_) {}
+  }
+  return S2010_TPL_GDOC_ID || '';
 }
-function normJaSpace_(s) {
+
+function s2010_copyTemplateToDrafts_(templateId, draftName, draftsFolder) {
+  const file = DriveApp.getFileById(templateId);
+  const mime = file.getMimeType();
+  if (mime === S2010_MIME_GDOC) {
+    return file.makeCopy(draftName, draftsFolder).getId();
+  }
+  if (mime === S2010_MIME_DOCX) {
+    if (!Drive || !Drive.Files || typeof Drive.Files.copy !== 'function') {
+      throw new Error('[S2010] Drive.Files.copy unavailable for docx template');
+    }
+    try {
+      Logger.log('[S2010] docx template detected. converting to gdoc: %s', templateId);
+    } catch (_) {}
+    const resource = {
+      title: draftName,
+      mimeType: S2010_MIME_GDOC,
+      parents: [{ id: draftsFolder.getId() }],
+    };
+    const copied = Drive.Files.copy(resource, templateId, { convert: true });
+    return copied.id;
+  }
+  throw new Error('[S2010] unsupported template mime: ' + mime);
+}
+
+function s2010_exportDocxFromGdoc_(gdocId, draftName, draftsFolder) {
+  if (!gdocId) return { docxId: '', docxUrl: '' };
+  const docxName = draftName + '.docx';
+  const existing = s2010_findFileByName_(draftsFolder, docxName);
+  if (existing) {
+    const existingId = existing.getId();
+    return { docxId: existingId, docxUrl: DriveApp.getFileById(existingId).getUrl() };
+  }
+  try {
+    const url = 'https://www.googleapis.com/drive/v3/files/' + gdocId + '/export?mimeType=' + encodeURIComponent(S2010_MIME_DOCX);
+    const resp = UrlFetchApp.fetch(url, {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true,
+    });
+    if (resp.getResponseCode() === 200) {
+      const blob = resp.getBlob().setName(docxName);
+      const docx = draftsFolder.createFile(blob);
+      const docxId = docx.getId();
+      return { docxId: docxId, docxUrl: DriveApp.getFileById(docxId).getUrl() };
+    }
+    Logger.log('[S2010] DOCX export failed: %s', resp.getContentText());
+  } catch (e) {
+    Logger.log('[S2010] DOCX export error: %s', e);
+  }
+  return { docxId: '', docxUrl: '' };
+}
+
+function s2010_findFileByName_(folder, name) {
+  if (!folder || !name) return null;
+  const it = folder.getFilesByName(name);
+  return it.hasNext() ? it.next() : null;
+}
+
+function s2010_makeDraftKeyFromParts_(parts) {
+  const list = (parts || []).map((p) => {
+    const key = getS2010FormKey_(p);
+    const meta = (p && p.json && p.json.meta) || {};
+    const sid = meta.submission_id || meta.submissionId || p.fileId || '';
+    return key + ':' + String(sid || p.fileId || '');
+  });
+  const raw = list.join('|');
+  if (!raw) {
+    return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMddHHmmss');
+  }
+  return s2010_sha1Hex_(raw);
+}
+
+function s2010_sha1Hex_(input) {
+  const bytes = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_1,
+    String(input || ''),
+    Utilities.Charset.UTF_8
+  );
+  return bytes
+    .map(function (b) {
+      const v = (b < 0 ? b + 256 : b).toString(16);
+      return v.length === 1 ? '0' + v : v;
+    })
+    .join('');
+}
+
+function s2010_resolveExistingCaseFolderId_(caseInfo) {
+  const rawId =
+    typeof extractDriveIdMaybe_ === 'function'
+      ? extractDriveIdMaybe_(caseInfo.folderId || '')
+      : s2010_extractDriveIdMaybe_(caseInfo.folderId || '');
+  if (rawId) {
+    try {
+      const f = DriveApp.getFolderById(rawId);
+      if (f && f.getId()) return rawId;
+    } catch (_) {}
+  }
+
+  const caseId = caseInfo.caseId || caseInfo.case_id || '';
+  let caseKey = caseInfo.caseKey || caseInfo.case_key || '';
+  if (!caseKey) {
+    const lid = String(caseInfo.lineId || caseInfo.line_id || '').trim();
+    const normCase = typeof normalizeCaseIdString_ === 'function'
+      ? normalizeCaseIdString_
+      : function (v) { return String(v || '').trim(); };
+    const cid = normCase(caseId);
+    if (lid && cid) caseKey = lid.slice(0, 6).toLowerCase() + '-' + cid;
+  }
+
+  if (caseKey) {
+    let foundId = '';
+    if (typeof findBestCaseFolderUnderRoot_ === 'function') {
+      const best = findBestCaseFolderUnderRoot_(caseKey);
+      if (best && best.id) foundId = best.id;
+    }
+    if (!foundId && typeof drive_getRootFolder_ === 'function') {
+      const it = drive_getRootFolder_().getFoldersByName(caseKey);
+      if (it.hasNext()) foundId = it.next().getId();
+    }
+    if (foundId) {
+      try {
+        if (caseId && typeof updateCasesRow_ === 'function') {
+          updateCasesRow_(caseId, { folder_id: foundId, case_key: caseKey });
+        }
+      } catch (_) {}
+      return foundId;
+    }
+  }
+  return '';
+}
+
+function s2010_extractDriveIdMaybe_(v) {
+  const s = String(v || '').trim();
+  if (!s) return '';
+  let m = s.match(/\/folders\/([A-Za-z0-9_-]{10,})/);
+  if (m) return m[1];
+  m = s.match(/\/d\/([A-Za-z0-9_-]{10,})/);
+  if (m) return m[1];
+  if (/^[A-Za-z0-9_-]{10,}$/.test(s)) return s;
+  return '';
+}
+
+function s2010_pickP1Model_(parts) {
+  const found = (parts || []).find((p) => String(getS2010FormKey_(p)).startsWith('s2010_p1_'));
+  return found && found.json && found.json.model ? found.json.model : null;
+}
+
+function s2010_pad2_(v) {
+  return v ? String(v).padStart(2, '0') : '';
+}
+
+function s2010_parseYmdParts_(v) {
+  const d = s2010_toYMD_(v);
+  return { yyyy: d.yyyy || '', mm: s2010_pad2_(d.mm || ''), dd: s2010_pad2_(d.dd || '') };
+}
+
+function s2010_formatYmdJa_(v) {
+  const d = s2010_parseYmdParts_(v);
+  if (!d.yyyy) return '';
+  if (d.mm && d.dd) return `${d.yyyy}年${d.mm}月${d.dd}日`;
+  if (d.mm) return `${d.yyyy}年${d.mm}月`;
+  return `${d.yyyy}年`;
+}
+
+function s2010_jobKindFlags_(kindRaw) {
+  const kind = String(kindRaw || '');
+  return {
+    employee: /勤め|正社員|従業員/i.test(kind),
+    part: /パート|ｱﾙﾊﾞｲﾄ|アルバイト|派遣|契約/i.test(kind),
+    self: /自営|自営業|個人事業/i.test(kind),
+    representative: /法人代表者|代表|社長|取締役/i.test(kind),
+    unemployed: /無職|失業/i.test(kind),
+  };
+}
+
+function s2010_buildJobFromP1_(job) {
+  const start = s2010_parseYmdParts_(job.start_iso || '');
+  const end = s2010_parseYmdParts_(job.end_iso || '');
+  const kind = s2010_jobKindFlags_(job.type || '');
+  const isUnemployed = !!kind.unemployed;
+  const hasEnd = !!(end.yyyy || end.mm);
+  const isCurrent = !isUnemployed && !hasEnd;
+  const endText = isCurrent ? '現　在' : end.yyyy && end.mm ? `${end.yyyy}年${end.mm}月` : '';
+  return {
+    company: s2010_normJaSpace_(job.employer || ''),
+    from_yyyy: start.yyyy || '',
+    from_mm: start.mm || '',
+    from_dd: start.dd || '',
+    end_yyyy: isUnemployed ? '' : end.yyyy || '',
+    end_mm: isUnemployed ? '' : end.mm || '',
+    end_dd: isUnemployed ? '' : end.dd || '',
+    to_yyyy: isUnemployed ? '' : end.yyyy || '',
+    to_mm: isUnemployed ? '' : end.mm || '',
+    to_dd: isUnemployed ? '' : end.dd || '',
+    end_text: isUnemployed ? '' : endText,
+    avg_monthly: isUnemployed ? '' : s2010_toNumberText_(job.avg_month_income),
+    severance: s2010_toBoolJaLoose_(job.severance),
+    kind: kind,
+  };
+}
+
+function s2010_buildJobFromLegacy_(job) {
+  return {
+    company: s2010_normJaSpace_((job && job.company) || ''),
+    from_yyyy: (job && job.from_yyyy) || '',
+    from_mm: (job && job.from_mm) || '',
+    from_dd: (job && job.from_dd) || '',
+    end_yyyy: (job && job.end_yyyy) || '',
+    end_mm: (job && job.end_mm) || '',
+    end_dd: (job && job.end_dd) || '',
+    to_yyyy: (job && (job.to_yyyy || job.end_yyyy)) || '',
+    to_mm: (job && (job.to_mm || job.end_mm)) || '',
+    to_dd: (job && (job.to_dd || job.end_dd)) || '',
+    end_text: (job && job.end_text) || '',
+    avg_monthly: (job && job.avg_monthly) || '',
+    severance: !!(job && job.severance),
+    kind: (job && job.kind) || s2010_jobKindFlags_(''),
+  };
+}
+
+function s2010_emptyJob_() {
+  return {
+    company: '',
+    from_yyyy: '',
+    from_mm: '',
+    from_dd: '',
+    end_yyyy: '',
+    end_mm: '',
+    end_dd: '',
+    to_yyyy: '',
+    to_mm: '',
+    to_dd: '',
+    end_text: '',
+    avg_monthly: '',
+    severance: false,
+    kind: s2010_jobKindFlags_(''),
+  };
+}
+
+function s2010_toCohab_(v) {
+  const s = String(v || '').trim();
+  if (/^同(居)?$/.test(s)) return true;
+  if (/^別(居)?$/.test(s)) return false;
+  return null;
+}
+
+function s2010_buildHouseholdFromP1_(rows) {
+  const out = [];
+  for (let i = 0; i < 4; i++) {
+    const row = rows[i] || {};
+    out.push({
+      name: s2010_normSpace_(row.name || ''),
+      relation: String(row.relation || '').trim(),
+      age: row.age != null ? String(row.age) : '',
+      occupation: String(row.occupation_or_grade || row.occupation || '').trim(),
+      cohab: s2010_toCohab_(row.living),
+      income: s2010_toNumberText_(row.avg_month_income),
+    });
+  }
+  return out;
+}
+
+function s2010_maritalFlags_(reason) {
+  const s = String(reason || '');
+  return {
+    marriage: /結婚/.test(s),
+    divorce: /離婚/.test(s),
+    commonlaw: /内縁(?!解消|終了)/.test(s),
+    commonlaw_end: /内縁解消|内縁終了/.test(s),
+    death: /死別|死亡/.test(s),
+  };
+}
+
+function s2010_inheritanceStatusFlags_(statusText) {
+  const s = String(statusText || '');
+  const waive = /放棄/.test(s);
+  const dispose = /遺産.*処理|処分/.test(s);
+  const other = !!s && !waive && !dispose;
+  return { waive: waive, dispose: dispose, other: other };
+}
+
+function s2010_inheritanceStatusFlagsV2_(statusText, logCtx) {
+  const s = String(statusText || '').trim();
+  const flags = { waive: false, divided: false, pending: false, none: false };
+  if (!s) return flags;
+  if (/放棄/.test(s)) {
+    flags.waive = true;
+    return flags;
+  }
+  if (/分割済|分割完了|分割|協議成立|協議済|解決/.test(s)) {
+    flags.divided = true;
+    return flags;
+  }
+  if (/未分割|協議中|手続中|調停|審判|裁判|係争|保留|pending/i.test(s)) {
+    flags.pending = true;
+    return flags;
+  }
+  if (/なし|無|該当なし|特になし/.test(s)) {
+    flags.none = true;
+    return flags;
+  }
+  try {
+    Logger.log('[S2010] unknown inheritance status: %s %s', s, logCtx || '');
+  } catch (_) {}
+  return flags;
+}
+
+function s2010_housingTypeFlags_(type) {
+  const s = String(type || '');
+  return {
+    private_rent: /民間賃貸住宅/.test(s),
+    public_rent: /公営住宅/.test(s),
+    owned: /持ち家/.test(s),
+    other_person: /申立人以外の者/.test(s),
+    other: /その他/.test(s),
+  };
+}
+
+function s2010_ownOrRentFlags_(value) {
+  const s = String(value || '');
+  return {
+    own: /所有|持ち家/.test(s),
+    rent: /賃借|賃貸/.test(s),
+  };
+}
+
+function s2010_housingOwnedDetailFlags_(detail) {
+  const s = String(detail || '');
+  return {
+    detached: /一戸建|戸建/.test(s),
+    mansion: /マンション|分譲/.test(s),
+  };
+}
+
+function s2010_pickFieldValue_(parsed, re) {
+  return s2010_findFieldValue_(parsed || {}, re);
+}
+
+function s2010_pickHousingDesc_(parsed) {
+  return s2010_pickFieldValue_(parsed, /現在の住居の状況（居住する家屋の形態等）/);
+}
+
+function s2010_buildS2010PlaceholderMap_(m, parsed, logCtx) {
+  const M = m || {};
+  const map = {};
+  const setText = function (token, value) {
+    map[token] = value == null ? '' : String(value);
+  };
+  const setCheck = function (token, value) {
+    map[token] = s2010_renderCheck_(!!value);
+  };
+
+  const app = M.app || {};
+  const addr = M.addr || {};
+  const stmt = M.stmt || {};
+  const birthParts = String(app.birth_iso || '').split('-');
+  const w = app.birth_wareki || null;
+
+  setText('{{app.name}}', app.name || '');
+  setText('{{app.kana}}', app.kana || '');
+  setText('{{app.birth_yyyy}}', birthParts[0] || '');
+  setText('{{app.birth_mm}}', birthParts[1] || '');
+  setText('{{app.birth_dd}}', birthParts[2] || '');
+  setText('{{app.birth_wareki_gengo}}', (w && w.gengo) || '');
+  setText('{{app.birth_wareki_yy}}', (w && String(w.yy)) || '');
+  setText('{{app.age}}', app.age != null ? String(app.age) : '');
+  setText('{{addr.full}}', s2010_normJaSpace_(addr.full || ''));
+  setText('{{addr.alt_full}}', s2010_normJaSpace_(addr.alt_full || ''));
+  setText('{{stmt.free}}', (stmt.free || '').trim());
+
+  // household (hh)
+  let hhRows = Array.isArray(M.hh) ? M.hh : [];
+  const p1Household = Array.isArray(M.household) ? M.household : [];
+  if (p1Household.length) hhRows = s2010_buildHouseholdFromP1_(p1Household);
+  for (let i = 1; i <= 4; i++) {
+    const h = hhRows[i - 1] || {};
+    const cohabSame = h.cohab === true || /同居/.test(String(h.cohab || ''));
+    const cohabSeparate = h.cohab === false || /別居/.test(String(h.cohab || ''));
+    const cohabText =
+      h.cohab === true ? '同居' : h.cohab === false ? '別居' : String(h.cohab || '');
+
+    setText(`{{hh${i}.name}}`, h.name || '');
+    setText(`{{hh${i}.relation}}`, h.relation || '');
+    setText(`{{hh${i}.age}}`, h.age || '');
+    setText(`{{hh${i}.occupation}}`, h.occupation || '');
+    setText(`{{hh${i}.job_or_grade}}`, h.occupation || '');
+    setText(`{{hh${i}.cohab}}`, cohabText);
+    setText(`{{hh${i}.living}}`, cohabText);
+    setText(`{{hh${i}.income}}`, h.income || '');
+    setText(`{{hh${i}.avg_monthly}}`, h.income || '');
+    setText(`{{hh${i}.monthly}}`, h.income || '');
+    setCheck(`{{chk.hh${i}.cohab.same}}`, cohabSame);
+    setCheck(`{{chk.hh${i}.cohab.separate}}`, cohabSeparate);
+    setCheck(`{{chk.hh${i}.cohab}}`, cohabSame);
+    setCheck(`{{chk.hh${i}.separate}}`, cohabSeparate);
+    setCheck(`{{chk.hh${i}.cohab.live}}`, cohabSame);
+    setCheck(`{{chk.hh${i}.cohab.separate}}`, cohabSeparate);
+  }
+
+  // reason/trigger/unable/notice
+  setCheck('{{chk.reason.living}}', !!M.reason?.living);
+  setCheck('{{chk.reason.mortgage}}', !!M.reason?.mortgage);
+  setCheck('{{chk.reason.education}}', !!M.reason?.education);
+  setCheck('{{chk.reason.business}}', !!M.reason?.business);
+  setCheck('{{chk.reason.guarantee}}', !!M.reason?.guarantee);
+  setCheck('{{chk.reason.waste}}', !!M.reason?.waste);
+  setCheck('{{chk.reason.other}}', !!M.reason?.other);
+  setText('{{reason.other_text}}', M.reason?.other_text || '');
+
+  setCheck('{{chk.trigger.overpay}}', !!M.trigger?.overpay);
+  setCheck('{{chk.trigger.dismiss}}', !!M.trigger?.dismiss);
+  setCheck('{{chk.trigger.paycut}}', !!M.trigger?.paycut);
+  setCheck('{{chk.trigger.hospital}}', !!M.trigger?.hospital);
+  setCheck('{{chk.trigger.other}}', !!M.trigger?.other);
+  setText('{{trigger.other_text}}', M.trigger?.other_text || '');
+
+  setText('{{unable_yyyy}}', M.unable_yyyy || '');
+  setText('{{unable_mm}}', M.unable_mm || '');
+  setText('{{unable_monthly_total}}', M.unable_monthly_total || '');
+  setText('{{notice_yyyy}}', M.notice_yyyy || '');
+  setText('{{notice_mm}}', M.notice_mm || '');
+  setText('{{notice_dd}}', M.notice_dd || '');
+
+  // jobs
+  const jobs = Array.isArray(M.jobs) ? M.jobs : [];
+  for (let i = 1; i <= 8; i++) {
+    const src = jobs[i - 1];
+    const job = src
+      ? s2010_buildJobFromP1_(src)
+      : i === 1 && M.jobs1
+      ? s2010_buildJobFromLegacy_(M.jobs1)
+      : s2010_emptyJob_();
+    setText(`{{jobs${i}.company}}`, job.company || '');
+    setText(`{{jobs${i}.from_yyyy}}`, job.from_yyyy || '');
+    setText(`{{jobs${i}.from_mm}}`, job.from_mm || '');
+    setText(`{{jobs${i}.from_dd}}`, job.from_dd || '');
+    setText(`{{jobs${i}.end_yyyy}}`, job.end_yyyy || '');
+    setText(`{{jobs${i}.end_mm}}`, job.end_mm || '');
+    setText(`{{jobs${i}.end_dd}}`, job.end_dd || '');
+    setText(`{{jobs${i}.to_yyyy}}`, job.to_yyyy || '');
+    setText(`{{jobs${i}.to_mm}}`, job.to_mm || '');
+    setText(`{{jobs${i}.to_dd}}`, job.to_dd || '');
+    setText(`{{jobs${i}.end_text}}`, job.end_text || '');
+    setText(`{{jobs${i}.avg_monthly}}`, job.avg_monthly || '');
+    setCheck(`{{chk.jobs${i}.severance}}`, !!job.severance);
+    setCheck(`{{jobs${i}.chk.severance}}`, !!job.severance);
+    setCheck(`{{chk.jobs${i}.kind.employee}}`, !!job.kind.employee);
+    setCheck(`{{chk.jobs${i}.kind.part}}`, !!job.kind.part);
+    setCheck(`{{chk.jobs${i}.kind.self}}`, !!job.kind.self);
+    setCheck(`{{chk.jobs${i}.kind.representative}}`, !!job.kind.representative);
+    setCheck(`{{chk.jobs${i}.kind.unemployed}}`, !!job.kind.unemployed);
+    setCheck(`{{jobs${i}.chk.kind.employee}}`, !!job.kind.employee);
+    setCheck(`{{jobs${i}.chk.kind.part}}`, !!job.kind.part);
+    setCheck(`{{jobs${i}.chk.kind.self}}`, !!job.kind.self);
+    setCheck(`{{jobs${i}.chk.kind.representative}}`, !!job.kind.representative);
+    setCheck(`{{jobs${i}.chk.kind.unemployed}}`, !!job.kind.unemployed);
+  }
+
+  // marital
+  const marital = Array.isArray(M.marital_events) ? M.marital_events : [];
+  for (let i = 1; i <= 4; i++) {
+    const row = marital[i - 1] || {};
+    const dt = s2010_parseYmdParts_(row.date_iso || '');
+    const flags = s2010_maritalFlags_(row.reason || '');
+    const reasonText = s2010_normJaSpace_(row.reason || '');
+    setText(`{{marital${i}.time}}`, s2010_formatYmdJa_(row.date_iso || ''));
+    setText(`{{marital${i}.yyyy}}`, dt.yyyy || '');
+    setText(`{{marital${i}.mm}}`, dt.mm || '');
+    setText(`{{marital${i}.dd}}`, dt.dd || '');
+    setText(`{{marital${i}.partner}}`, s2010_normJaSpace_(row.partner_name || ''));
+    setText(`{{marital${i}.reason}}`, reasonText);
+    setText(`{{marital${i}.reason_text}}`, reasonText);
+    setCheck(`{{chk.marital${i}.kind.marriage}}`, !!flags.marriage);
+    setCheck(`{{chk.marital${i}.kind.divorce}}`, !!flags.divorce);
+    setCheck(`{{chk.marital${i}.kind.commonlaw}}`, !!flags.commonlaw);
+    setCheck(`{{chk.marital${i}.kind.commonlaw_end}}`, !!flags.commonlaw_end);
+    setCheck(`{{chk.marital${i}.kind.death}}`, !!flags.death);
+  }
+
+  // inheritances
+  const inheritances = Array.isArray(M.inheritances) ? M.inheritances : [];
+  for (let i = 1; i <= 4; i++) {
+    const row = inheritances[i - 1] || {};
+    const dt = s2010_parseYmdParts_(row.date_iso || '');
+    const statusText = s2010_normJaSpace_(row.status || '');
+    const statusFlags = s2010_inheritanceStatusFlagsV2_(statusText, logCtx);
+    const legacyFlags = s2010_inheritanceStatusFlags_(statusText);
+    setText(`{{inh${i}.decedent_name}}`, s2010_normJaSpace_(row.decedent_name || ''));
+    setText(`{{inh${i}.relation}}`, s2010_normJaSpace_(row.relation || ''));
+    setText(`{{inh${i}.yyyy}}`, dt.yyyy || '');
+    setText(`{{inh${i}.mm}}`, dt.mm || '');
+    setText(`{{inh${i}.dd}}`, dt.dd || '');
+    setText(`{{inh${i}.status}}`, statusText);
+    setText(`{{inh${i}.status_text}}`, statusText);
+    setText(`{{inh${i}.name}}`, s2010_normJaSpace_(row.decedent_name || ''));
+    setText(`{{inh${i}.date}}`, s2010_formatYmdJa_(row.date_iso || ''));
+    setCheck(`{{chk.inh${i}.status.waive}}`, !!statusFlags.waive);
+    setCheck(`{{chk.inh${i}.status.divided}}`, !!statusFlags.divided);
+    setCheck(`{{chk.inh${i}.status.pending}}`, !!statusFlags.pending);
+    setCheck(`{{chk.inh${i}.status.none}}`, !!statusFlags.none);
+    setCheck(`{{chk.inh${i}.status.dispose}}`, !!legacyFlags.dispose);
+    setCheck(`{{chk.inh${i}.status.other}}`, !!legacyFlags.other);
+  }
+
+  // housing
+  const housing = M.housing || {};
+  const housingType = String(housing.type || '');
+  const housingFlags = s2010_housingTypeFlags_(housingType);
+  const housingDesc = s2010_pickHousingDesc_(parsed) || housingType || '';
+  const ownedRaw = s2010_pickFieldValue_(parsed, /持ち家/);
+  const ownOrRent = housing.other_own_or_rent || s2010_pickFieldValue_(parsed, /家屋は所有か賃借/);
+  const otherText = s2010_pickFieldValue_(parsed, /^【\s*その他\s*】$/);
+  const housingOwned = !!String(ownedRaw || '').trim();
+  const ownOrRentFlags = s2010_ownOrRentFlags_(ownOrRent);
+  const otherOwnRentFlags = s2010_ownOrRentFlags_(housing.other_own_or_rent || ownOrRent || '');
+  const ownedDetailFlags = s2010_housingOwnedDetailFlags_(housing.detail || '');
+  const housingOther = s2010_normJaSpace_(housing.notes || otherText || '');
+
+  setText('{{housing.type}}', s2010_normJaSpace_(housingType));
+  setText('{{housing.owner}}', s2010_normJaSpace_(housing.owner || ''));
+  setText('{{housing.detail}}', s2010_normJaSpace_(housing.detail || ''));
+  setText('{{housing.notes}}', s2010_normJaSpace_(housing.notes || ''));
+  setText('{{housing.other_name}}', s2010_normJaSpace_(housing.other_name || ''));
+  setText('{{housing.other_relation}}', s2010_normJaSpace_(housing.other_relation || ''));
+  setText('{{housing.other_own_or_rent}}', s2010_normJaSpace_(housing.other_own_or_rent || ''));
+  setText('{{housing.desc}}', s2010_normJaSpace_(housingDesc));
+  setText('{{housing.other_owner_name}}', s2010_normJaSpace_(housing.other_name || ''));
+  setText('{{housing.other_owner_relation}}', s2010_normJaSpace_(housing.other_relation || ''));
+  setText('{{housing.own_or_rent}}', s2010_normJaSpace_(ownOrRent || ''));
+  setText('{{housing.other_text}}', s2010_normJaSpace_(otherText || ''));
+  setText('{{housing.other}}', housingOther);
+  setCheck('{{chk.housing.owned}}', housingOwned);
+  setCheck('{{chk.housing.rent}}', !!ownOrRentFlags.rent);
+  setCheck('{{chk.housing.own}}', !!ownOrRentFlags.own);
+  setCheck('{{chk.housing.type.private_rent}}', !!housingFlags.private_rent);
+  setCheck('{{chk.housing.type.public_rent}}', !!housingFlags.public_rent);
+  setCheck('{{chk.housing.type.owned}}', !!housingFlags.owned);
+  setCheck('{{chk.housing.type.other_person}}', !!housingFlags.other_person);
+  setCheck('{{chk.housing.type.other}}', !!housingFlags.other);
+  setCheck('{{chk.housing.owned.detached}}', !!ownedDetailFlags.detached);
+  setCheck('{{chk.housing.owned.mansion}}', !!ownedDetailFlags.mansion);
+  setCheck('{{chk.housing.other_own}}', !!otherOwnRentFlags.own);
+  setCheck('{{chk.housing.other_rent}}', !!otherOwnRentFlags.rent);
+
+  return map;
+}
+
+function s2010_applyS2010Placeholders_(doc, map) {
+  if (!doc || !map) return;
+  Object.keys(map)
+    .sort()
+    .forEach(function (token) {
+      s2010_replaceAllEverywhere_(doc, token, map[token]);
+    });
+}
+
+function s2010_findUnresolvedPlaceholders_(doc) {
+  if (!doc) return [];
+  const parts = [];
+  try { parts.push(doc.getBody().getText()); } catch (_) {}
+  try {
+    const header = doc.getHeader();
+    if (header) parts.push(header.getText());
+  } catch (_) {}
+  try {
+    const footer = doc.getFooter();
+    if (footer) parts.push(footer.getText());
+  } catch (_) {}
+  const text = parts.join('\n');
+  const matches = text.match(/{{[^}]+}}/g) || [];
+  const uniq = {};
+  matches.forEach(function (m) { uniq[m] = true; });
+  return Object.keys(uniq);
+}
+
+// すでにS2002側に同名があるなら、そちらが使われます（同実装）。
+function s2010_replaceAllEverywhere_(doc, token, value) {
+  if (!doc) return;
+  s2010_replaceAllText_(doc.getBody(), token, value);
+  try {
+    const header = doc.getHeader();
+    if (header) s2010_replaceAllText_(header, token, value);
+  } catch (_) {}
+  try {
+    const footer = doc.getFooter();
+    if (footer) s2010_replaceAllText_(footer, token, value);
+  } catch (_) {}
+}
+
+// すでにS2002側に同名があるなら、そちらが使われます（同実装）。
+function s2010_replaceAllText_(element, token, value) {
+  if (!element) return;
+  const safe = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const replacement = String(value ?? '').replace(/\\/g, '\\\\').replace(/\$/g, '$$$$');
+  element.replaceText(safe, replacement);
+}
+function s2010_normJaSpace_(s) {
   return String(s || '')
     .replace(/\u3000/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
-function findFieldValue_(m, labelRegex) {
+function s2010_findFieldValue_(m, labelRegex) {
   const arr = (m && m.fieldsRaw) || [];
-  const hit = arr.find((f) => labelRegex.test(String(f.label || '')));
-  return hit ? String(hit.value || '') : '';
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const f = arr[i];
+    if (labelRegex.test(String(f.label || ''))) return String(f.value || '');
+  }
+  return '';
 }
-function splitMulti_(s) {
+function s2010_splitMulti_(s) {
   return String(s || '')
     .split(/[\r\n、，,・;；]+/)
-    .map((v) => normJaSpace_(v))
+    .map((v) => s2010_normJaSpace_(v))
     .filter(Boolean);
 }
-function hasAny_(arr, re) {
+function s2010_hasAny_(arr, re) {
   return (arr || []).some((v) => re.test(v));
 }
-function pickOtherText_(raw) {
+function s2010_pickOtherText_(raw) {
   const m = String(raw || '').match(/その他[：: ]*([^\n]+)/);
-  return m ? normJaSpace_(m[1]) : '';
+  return m ? s2010_normJaSpace_(m[1]) : '';
 }
-function toYMP_(s) {
-  const a = toYMD_(s);
+function s2010_toYMP_(s) {
+  const a = s2010_toYMD_(s);
   return { yyyy: a.yyyy, mm: a.mm };
 }
-function toYMD_(s) {
+function s2010_toYMD_(s) {
   let str = String(s || '').trim();
-  const era = str.match(/(令和|平成|昭和)\s*(\d+)年(?:\s*(\d+)月)?(?:\s*(\d+)日)?/);
+  const era = str.match(/(令和|平成|昭和)\s*(\d+|元)年(?:\s*(\d+)月)?(?:\s*(\d+)日)?/);
   if (era) {
-    const y = { 令和: 2018, 平成: 1988, 昭和: 1925 }[era[1]] + parseInt(era[2], 10);
+    const yy = era[2] === '元' ? 1 : parseInt(era[2], 10);
+    const y = { 令和: 2018, 平成: 1988, 昭和: 1925 }[era[1]] + yy;
     return { yyyy: String(y), mm: era[3] ? String(era[3]) : '', dd: era[4] ? String(era[4]) : '' };
   }
   const m = str
@@ -755,15 +1440,15 @@ function toYMD_(s) {
     .split('-');
   return { yyyy: m[0] || '', mm: m[1] || '', dd: m[2] || '' };
 }
-function toNumberText_(s) {
+function s2010_toNumberText_(s) {
   const n = String(s || '').replace(/[^\d]/g, '');
   return n ? n.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : '';
 }
-function toBoolJaLoose_(v) {
+function s2010_toBoolJaLoose_(v) {
   const s = String(v || '').trim();
   return /^(はい|有|あり|有り|true|当|○|チェック)$/i.test(s);
 }
-function parseNameKanaValue_(raw) {
+function s2010_parseNameKanaValue_(raw) {
   const s = String(raw || '').trim();
   const isKana = (t) => /^[\p{Script=Hiragana}\p{Script=Katakana}\u30FC\s・･ｰﾞﾟ\-]+$/u.test(t);
   const hasKanji = (t) => /[\p{Script=Han}]/u.test(t);
@@ -786,16 +1471,16 @@ function parseNameKanaValue_(raw) {
   }
   return isKana(s) ? { name: '', kana: s } : { name: s, kana: '' };
 }
-function normSpace_(s) {
+function s2010_normSpace_(s) {
   return String(s || '')
     .replace(/\s+/g, ' ')
     .trim();
 }
-function normPhone_(s) {
+function s2010_normPhone_(s) {
   const t = String(s || '').replace(/[^\d]/g, '');
   return t ? t.replace(/(\d{2,4})(\d{2,4})(\d{3,4})/, '$1-$2-$3') : '';
 }
-function toIsoBirth_(ja) {
+function s2010_toIsoBirth_(ja) {
   let s = String(ja)
     .trim()
     .replace(/[年月]/g, '-')
@@ -809,7 +1494,7 @@ function toIsoBirth_(ja) {
     d = ('0' + m[3]).slice(-2);
   return `${y}-${mo}-${d}`;
 }
-function calcAge_(iso) {
+function s2010_calcAge_(iso) {
   const [y, m, d] = iso.split('-').map(Number);
   const today = new Date(),
     b = new Date(y, m - 1, d);
@@ -819,7 +1504,7 @@ function calcAge_(iso) {
   if (md < bd) age--;
   return age;
 }
-function toWareki_(iso) {
+function s2010_toWareki_(iso) {
   if (!iso) return null;
   const d = new Date(iso);
   const eras = [
@@ -837,7 +1522,7 @@ function toWareki_(iso) {
       };
   return null;
 }
-function safeHtml(s) {
+function s2010_safeHtml_(s) {
   return String(s).replace(
     /[&<>"']/g,
     (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m])
