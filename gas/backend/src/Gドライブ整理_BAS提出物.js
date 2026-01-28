@@ -1,16 +1,23 @@
 /********** 設定 **********/
 // Script Properties を最優先に使用（DRIVE_ROOT_FOLDER_ID → ROOT_FOLDER_ID の順）
 
-function getSecret_() {
-  // 両方試す：BOOTSTRAP_SECRET 優先、なければ TOKEN_SECRET
-  let s = props_().getProperty('BOOTSTRAP_SECRET') || props_().getProperty('TOKEN_SECRET') || '';
-  if (s && typeof s.replace === 'function') s = s.replace(/[\r\n]+$/g, '');
-  if (!s) throw new Error('missing secret');
-  return s;
+function propsSafe_() {
+  return typeof props_ === 'function'
+    ? props_()
+    : PropertiesService.getScriptProperties();
+}
+
+function gd_redact_(s, show) {
+  const size = Number.isFinite(show) ? show : 4;
+  const str = String(s || '');
+  if (!str) return '';
+  if (str.length <= size * 2) return '*'.repeat(str.length);
+  return str.slice(0, size) + '...' + str.slice(-size);
 }
 
 const ROOT_FOLDER_ID = (function () {
-  const id = props_().getProperty('DRIVE_ROOT_FOLDER_ID') || props_().getProperty('ROOT_FOLDER_ID');
+  const id =
+    propsSafe_().getProperty('DRIVE_ROOT_FOLDER_ID') || propsSafe_().getProperty('ROOT_FOLDER_ID');
   if (!id) throw new Error('DRIVE_ROOT_FOLDER_ID/ROOT_FOLDER_ID is not configured');
   return id;
 })();
@@ -19,18 +26,21 @@ const SHEET_ID = ''; // 既存の台帳シートを使うならIDを入れる。
 const LABEL_TO_PROCESS = 'FormAttach/ToProcess';
 const LABEL_PROCESSED = 'FormAttach/Processed';
 const LABEL_ERROR = 'FormAttach/Error';
+const LABEL_ATTACH_SAVED = 'FormAttach/AttachmentsSaved';
 // 通知の安全確認まわり（任意で切替可能）
 const SUBJECT_TAG = '[#FM-BAS]'; // 件名に含まれるタグ（空なら無効）
-const NOTIFY_SECRET = 'FM-BAS'; // META の secret 値（プロパティ未設定時のフォールバック）
+const NOTIFY_SECRET =
+  propsSafe_().getProperty('NOTIFY_SECRET') || propsSafe_().getProperty('SECRET') || '';
+const EXTRACT_SECRET =
+  propsSafe_().getProperty('EXTRACT_SECRET') || propsSafe_().getProperty('SECRET') || '';
 const REQUIRE_SECRET = true; // true: タグとsecret両方必須 / false: どちらか片方でOK（共通ルール: 両方必須）
 const ASIA_TOKYO = 'Asia/Tokyo';
 
 // Script Properties 推奨（プロパティ未設定ならトンネル直URLを既定）
 const BASE = (
-  props_().getProperty('NEXT_BASE_URL') || 'https://depot-heath-television-ga.trycloudflare.com'
+  propsSafe_().getProperty('NEXT_BASE_URL') || 'https://depot-heath-television-ga.trycloudflare.com'
 ).replace(/\/+$/, '');
 const NEXT_API_URL = `${BASE}/api/extract`;
-const SECRET = props_().getProperty('SECRET') || 'FM-BAS';
 const ENABLE_FORM_LOG_SHORTCUTS = false; // ← ショートカット不要なら false
 
 /** 書類種別：フォルダは日本語(type)、ファイルは英数字コード(code) */
@@ -53,7 +63,7 @@ const FOLDER_NAME_MAX = 80; // Drive の見やすさ用に適度に丸める
 
 // 「書類提出」を1つのフォルダにまとめる
 const DOCS_BUCKET_NAME = '書類提出';
-const DOCS_FORM_KEYWORDS = ['書類提出']; // フォーム名にこの語が含まれたら集約
+const DOCS_FORM_KEYWORDS = ['書類提出', '書類アップロード', '提出書類']; // フォーム名にこの語が含まれたら集約
 function isDocsSubmission(formName) {
   const s = String(formName || '');
   return DOCS_FORM_KEYWORDS.some((k) => s.includes(k));
@@ -165,7 +175,19 @@ const RX_META_KV = /^\s*([A-Za-z0-9_]+)\s*:\s*(.*?)\s*$/gm;
 const RX_FIELD_LINE = /^\s*【(.+?)】\s*(.*)$/gm;
 
 // ==== OCR PoC 追加設定 ====
-const OCR_TARGET_FORMS = []; // []テスト用に空です。運用時はフォーム名に['書類', '給与明細']などを含む場合だけOCR実行
+const OCR_ENABLED_RAW = String(propsSafe_().getProperty('OCR_ENABLED') || '').trim();
+const ENABLE_OCR = OCR_ENABLED_RAW
+  ? OCR_ENABLED_RAW === '1'
+  : String(propsSafe_().getProperty('ENABLE_OCR') || '').trim() === '1';
+const ENABLE_EXTRACT = String(propsSafe_().getProperty('ENABLE_EXTRACT') || '').trim() === '1';
+const OCR_TARGET_FORMS = (function () {
+  const raw = String(propsSafe_().getProperty('OCR_TARGET_FORMS') || '').trim();
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((s) => String(s || '').trim())
+    .filter(Boolean);
+})();
 const OCR_LANG_HINTS = ['ja', 'en']; // 日本語＋英語
 const OCR_PROCESSED_PROP = 'ocr_processed'; // Driveファイルのプロパティ名
 
@@ -323,8 +345,15 @@ function ensurePublicImageUrl_(file) {
 
 // 抽出API呼び出しの共通関数
 function postExtract_(fileId, imageUrl, ocrText, lineId) {
+  if (!ENABLE_EXTRACT || !NEXT_API_URL || !EXTRACT_SECRET) {
+    return {
+      ok: false,
+      status: 0,
+      error: 'extract_disabled_or_unconfigured',
+    };
+  }
   const url = NEXT_API_URL;
-  const secret = SECRET || 'FM-BAS';
+  const secret = EXTRACT_SECRET;
   const payload = { imageUrl, ocrText, lineId, sourceId: fileId };
 
   const resp = UrlFetchApp.fetch(url, {
@@ -556,6 +585,7 @@ function ensureLabels() {
   GmailApp.getUserLabelByName(LABEL_TO_PROCESS) || GmailApp.createLabel(LABEL_TO_PROCESS);
   GmailApp.getUserLabelByName(LABEL_PROCESSED) || GmailApp.createLabel(LABEL_PROCESSED);
   GmailApp.getUserLabelByName(LABEL_ERROR) || GmailApp.createLabel(LABEL_ERROR);
+  GmailApp.getUserLabelByName(LABEL_ATTACH_SAVED) || GmailApp.createLabel(LABEL_ATTACH_SAVED);
 }
 // 安全に Spreadsheet を確保（Sheet を誤って渡された場合でも親を辿る）
 function ensureSpreadsheet_(obj) {
@@ -720,6 +750,140 @@ function reconcileEmailStagingToCase_(lineId, caseId, email, submitYm) {
   if (!srcEmailFolder.getFolders().hasNext() && !srcEmailFolder.getFiles().hasNext()) {
     ymFolder.removeFolder(srcEmailFolder);
   }
+}
+
+function attachmentDescValue_(desc, key) {
+  const re = new RegExp('(?:^|\\n)' + key + '=([^\\n]*)');
+  const m = String(desc || '').match(re);
+  return m ? String(m[1]).trim() : '';
+}
+
+function attachmentDocTypeFromDesc_(desc) {
+  return attachmentDescValue_(desc, 'doc_type');
+}
+
+function moveStagingDocTypesToCase_(srcFolder, attachRoot) {
+  let moved = 0;
+  const docTypes = srcFolder.getFolders();
+  while (docTypes.hasNext()) {
+    const docTypeFolder = docTypes.next();
+    const destType = getOrCreateFolder(attachRoot, docTypeFolder.getName());
+
+    const files = docTypeFolder.getFiles();
+    while (files.hasNext()) {
+      const f = files.next();
+      const desc = f.getDescription() || '';
+      const ch = attachmentDescValue_(desc, 'content_hash');
+      const dup = ch ? findExistingByHash_(destType, ch) : null;
+      if (!dup) {
+        destType.addFile(f);
+        srcFolder.removeFile(f);
+        moved++;
+      }
+    }
+    if (!docTypeFolder.getFiles().hasNext()) srcFolder.removeFolder(docTypeFolder);
+  }
+  return moved;
+}
+
+function reconcileEmailStagingAllMonthsToCase_(attachRoot, email) {
+  const e = normalizeEmail_(email || '');
+  const eh = emailHash_(e);
+  if (!eh) return 0;
+
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const stagingIt = root.getFoldersByName('_email_staging');
+  if (!stagingIt.hasNext()) return 0;
+  const stagingRoot = stagingIt.next();
+
+  let moved = 0;
+  const ymIter = stagingRoot.getFolders();
+  while (ymIter.hasNext()) {
+    const ymFolder = ymIter.next();
+    const itEh = ymFolder.getFoldersByName(eh);
+    while (itEh.hasNext()) {
+      const srcEmailFolder = itEh.next();
+      moved += moveStagingDocTypesToCase_(srcEmailFolder, attachRoot);
+      if (!srcEmailFolder.getFolders().hasNext() && !srcEmailFolder.getFiles().hasNext()) {
+        try { ymFolder.removeFolder(srcEmailFolder); } catch (_) {}
+      }
+    }
+    if (!ymFolder.getFolders().hasNext() && !ymFolder.getFiles().hasNext()) {
+      try { stagingRoot.removeFolder(ymFolder); } catch (_) {}
+    }
+  }
+  return moved;
+}
+
+function reconcileStagingAttachmentsToCase_(lineId, caseId, email, opts) {
+  opts = opts || {};
+  const folderId = opts.caseFolderId || opts.folderId || '';
+  let caseFolder = opts.caseFolder || null;
+  if (!caseFolder && folderId) {
+    try { caseFolder = DriveApp.getFolderById(folderId); } catch (_) { caseFolder = null; }
+  }
+  if (!caseFolder) {
+    if (!lineId || !caseId) return { movedEmail: 0, movedStaging: 0 };
+    caseFolder = ensureCaseFolder_(lineId, caseId);
+  }
+  const attachRoot = getOrCreateFolder(caseFolder, 'attachments');
+
+  let movedEmail = 0;
+  let movedStaging = 0;
+  if (email) {
+    movedEmail = reconcileEmailStagingAllMonthsToCase_(attachRoot, email);
+  }
+
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const stagingIt = root.getFoldersByName('_staging');
+  if (stagingIt.hasNext()) {
+    const stagingRoot = stagingIt.next();
+    const wantLineId = String(lineId || '').trim();
+    const wantEmail = normalizeEmail_(email || '');
+    const wantEmailHash = emailHash_(wantEmail);
+    const stack = [stagingRoot];
+    while (stack.length) {
+      const cur = stack.pop();
+      const files = cur.getFiles();
+      while (files.hasNext()) {
+        const f = files.next();
+        const name = f.getName && f.getName();
+        if (!name || /\.json$/i.test(name)) continue;
+        const desc = f.getDescription() || '';
+        const lineInDesc = attachmentDescValue_(desc, 'line_id');
+        const emailHashInDesc = attachmentDescValue_(desc, 'email_hash');
+        if (
+          (wantLineId && lineInDesc && lineInDesc === wantLineId) ||
+          (wantEmailHash && emailHashInDesc && emailHashInDesc === wantEmailHash)
+        ) {
+          let docType = attachmentDocTypeFromDesc_(desc);
+          if (!docType) {
+            const parentName = cur && cur.getName ? cur.getName() : '';
+            if (
+              parentName &&
+              !/^submission_/i.test(parentName) &&
+              !/^\d{4}-\d{2}$/.test(parentName) &&
+              parentName !== '_staging'
+            ) {
+              docType = parentName;
+            }
+          }
+          const destType = getOrCreateFolder(attachRoot, docType || '未分類');
+          const ch = attachmentDescValue_(desc, 'content_hash');
+          const dup = ch ? findExistingByHash_(destType, ch) : null;
+          if (!dup) {
+            destType.addFile(f);
+            cur.removeFile(f);
+            movedStaging++;
+          }
+        }
+      }
+      const folders = cur.getFolders();
+      while (folders.hasNext()) stack.push(folders.next());
+    }
+  }
+
+  return { movedEmail, movedStaging };
 }
 
 /** 旧フォルダ（氏名__LINEID）→ 新フォルダ（<userKey-caseId>）へ移送（必要時に実行） */
@@ -945,7 +1109,7 @@ function parseMetaAndFields(msg) {
   const submitted_at = meta.submitted_at || '';
   const seq = meta.seq || '';
   const referrer = meta.referrer || '';
-  const secretOK = (meta.secret || '').trim() === SECRET && subjectSecretOK;
+  const secretOK = (meta.secret || '').trim() === NOTIFY_SECRET && subjectSecretOK;
 
   return {
     subject,
@@ -1022,11 +1186,8 @@ function checkNotificationGuard_(msg, meta) {
     Object.keys(meta || {}).forEach((k) => (metaLower[String(k).toLowerCase()] = meta[k]));
   } catch (_) {}
 
-  // 期待シークレット：プロパティ優先、無ければ定数
-  const expectedSecretRaw =
-    (props_() && (props_().getProperty('NOTIFY_SECRET') || props_().getProperty('SECRET'))) ||
-    (typeof NOTIFY_SECRET !== 'undefined' ? NOTIFY_SECRET : '') ||
-    '';
+  // 期待シークレット：NOTIFY_SECRET のみ使用
+  const expectedSecretRaw = String(typeof NOTIFY_SECRET !== 'undefined' ? NOTIFY_SECRET : '');
   const expected = _normToken(expectedSecretRaw);
   const provided = _normToken(metaLower['secret'] || '');
 
@@ -1039,15 +1200,17 @@ function checkNotificationGuard_(msg, meta) {
     hasSubjectTag,
     hasSecret,
     subjRaw,
-    metaLower['secret'] || '',
-    expectedSecretRaw
+    gd_redact_(metaLower['secret'] || '', 4),
+    gd_redact_(expectedSecretRaw || '', 4)
   );
 
   return { ok, hasTag: hasSubjectTag, hasSecret };
 }
 
 /********** 添付保存 + JSON保存 **********/
-function saveAttachmentsAndJson(meta, msg) {
+function saveAttachmentsAndJson(meta, msg, opts) {
+  opts = opts || {};
+  const skipJson = !!opts.skipJson;
   const when = msg.getDate();
   const submitYm = Utilities.formatDate(when, ASIA_TOKYO, 'yyyy-MM'); // 提出月（送信日時）
   const normalizedSubmissionId = normalizeSubmissionIdStrict_(meta.submission_id);
@@ -1209,7 +1372,6 @@ function saveAttachmentsAndJson(meta, msg) {
   });
 
   // 7) JSON保存：案件フォルダ直下へ <formkey>__<submissionId>.json（LINEなし時は従来どおり）
-  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
   let jsonParent;
   let folderIdForReturn = '';
   const caseIdForJson = resolveCaseId_(body, meta.subject || '', meta.line_id || '');
@@ -1220,21 +1382,27 @@ function saveAttachmentsAndJson(meta, msg) {
   } else {
     // LINEなし時は、最初の保存先フォルダ（email staging or _staging）に置く
     const first = saved[0];
-    jsonParent = first
-      ? DriveApp.getFolderById(first.folderId)
-      : ensureStagingPath_(submitYm, submissionId, '未分類');
-    folderIdForReturn = first ? first.folderId : jsonParent.getId();
+    jsonParent = first ? DriveApp.getFolderById(first.folderId) : null;
+    folderIdForReturn = first ? first.folderId : '';
   }
-  const jsonFile = saveSubmissionJsonShallow_(
-    jsonParent,
-    submissionId,
-    body,
-    meta.fields,
-    meta.subject || '',
-    meta.line_id || ''
-  );
 
-  return { folderId: folderIdForReturn, savedFiles: saved, jsonId: jsonFile.getId() };
+  let jsonFile = null;
+  if (!skipJson) {
+    if (!jsonParent) {
+      jsonParent = ensureStagingPath_(submitYm, submissionId, '未分類');
+      folderIdForReturn = folderIdForReturn || jsonParent.getId();
+    }
+    jsonFile = saveSubmissionJsonShallow_(
+      jsonParent,
+      submissionId,
+      body,
+      meta.fields,
+      meta.subject || '',
+      meta.line_id || ''
+    );
+  }
+
+  return { folderId: folderIdForReturn, savedFiles: saved, jsonId: jsonFile ? jsonFile.getId() : '' };
 }
 
 /********** 台帳＆顧客表 更新 **********/
@@ -1302,13 +1470,19 @@ function updateLedgers(meta, saved) {
 }
 
 /********** メイン処理 **********/
-function processLabel(labelName) {
+function processLabel(labelName, opts) {
+  opts = opts || {};
+  const onlyDocs = !!opts.onlyDocs;
+  const skipJson = !!opts.skipJson;
+  const markLabelName = opts.markLabelName || LABEL_ATTACH_SAVED;
   const labelToProcess = GmailApp.getUserLabelByName(labelName);
   if (!labelToProcess) return;
 
   const labelProcessed =
     GmailApp.getUserLabelByName(LABEL_PROCESSED) || GmailApp.createLabel(LABEL_PROCESSED);
   const labelError = GmailApp.getUserLabelByName(LABEL_ERROR) || GmailApp.createLabel(LABEL_ERROR);
+  const labelAttachSaved =
+    GmailApp.getUserLabelByName(markLabelName) || GmailApp.createLabel(markLabelName);
 
   const threads = labelToProcess.getThreads(0, 50); // 1回で最大50スレッド
   threads.forEach((thread) => {
@@ -1323,10 +1497,13 @@ function processLabel(labelName) {
     ) {
       return;
     }
-    if (labs.indexOf(LABEL_PROCESSED) >= 0 || labs.indexOf(LABEL_ERROR) >= 0) {
+    if (labs.indexOf(LABEL_PROCESSED) >= 0) {
       try {
         thread.removeLabel(labelToProcess);
       } catch (_) {}
+      return;
+    }
+    if (labs.indexOf(LABEL_ERROR) >= 0 || labs.indexOf(markLabelName) >= 0) {
       return;
     }
 
@@ -1356,19 +1533,40 @@ function processLabel(labelName) {
       if (parsed.form_name) upsertFormLogRegistry_(parsed.form_name);
       if (!parsed.form_name) parsed.form_name = 'unknown_form';
 
-      const saved = saveAttachmentsAndJson(parsed, msg);
+      const metaFormKey = String(metaKV.form_key || metaKV.formKey || '').trim().toLowerCase();
+      const isDocs = isDocsSubmission(parsed.form_name) || metaFormKey === 'doc_payslip';
+      if (onlyDocs && !isDocs) {
+        Logger.log('[skip] non-doc form=%s thread=%s', parsed.form_name, thread.getId && thread.getId());
+        return;
+      }
+
+      Logger.log(
+        '[attach] start thread=%s form=%s skipJson=%s',
+        thread.getId && thread.getId(),
+        parsed.form_name,
+        skipJson
+      );
+      const saved = saveAttachmentsAndJson(parsed, msg, { skipJson });
       ocr_processSaved_(saved, parsed);
 
-      thread.removeLabel(labelToProcess).addLabel(labelProcessed);
+      if ((saved.savedFiles || []).length > 0) {
+        thread.addLabel(labelAttachSaved);
+      }
+      if (!skipJson) {
+        try {
+          thread.removeLabel(labelToProcess).addLabel(labelProcessed);
+        } catch (_) {}
+      }
       Logger.log(
-        '[ok] processed thread=%s form=%s',
+        '[attach] done thread=%s form=%s files=%s',
         thread.getId && thread.getId(),
-        parsed.form_name
+        parsed.form_name,
+        (saved.savedFiles || []).length
       );
     } catch (e) {
       Logger.log('[err->Error] %s', (e && e.stack) || e);
       try {
-        thread.removeLabel(labelToProcess).addLabel(labelError);
+        thread.addLabel(labelError);
       } catch (_) {}
     }
   });
@@ -1526,53 +1724,64 @@ function ocr_saveExtraction_(file, extracted) {
  */
 function ocr_processSaved_(saved, meta) {
   try {
+    if (OCR_ENABLED_RAW && OCR_ENABLED_RAW !== '1') return;
     const form = String(meta.form_name || '');
-    if (OCR_TARGET_FORMS.length > 0 && !OCR_TARGET_FORMS.some((k) => form.includes(k))) return;
+    if (OCR_TARGET_FORMS.length === 0) return;
+    if (!OCR_TARGET_FORMS.some((k) => form.includes(k))) return;
+    if (!ENABLE_OCR && !ENABLE_EXTRACT) return;
 
     (saved.savedFiles || []).forEach((s) => {
       const file = DriveApp.getFileById(s.id);
+      const mt = String(file.getMimeType() || '').toLowerCase();
+      const isImage = /^image\/(png|jpe?g)$/i.test(mt);
+      if (!isImage) return;
       const parent = file.getParents().hasNext() ? file.getParents().next() : null;
       if (!parent) return;
 
       // 既に _model.json があればスキップ（再生成したい時は削除してから）
       if (parent.getFilesByName(s.id + '_model.json').hasNext()) return;
 
-      // まずOCRを試みる（既存あれば 'skipped'）
-      let text = ocr_runForImageFile_(file);
+      let text = '';
+      if (ENABLE_OCR) {
+        // まずOCRを試みる（既存あれば 'skipped'）
+        text = ocr_runForImageFile_(file);
 
-      // skippedなら既存の .ocr.txt を読み込む（なければ空でOK→画像のみで抽出）
-      if (text === 'skipped') {
-        const it = parent.getFilesByName(file.getName() + '.ocr.txt');
-        text = it.hasNext() ? it.next().getBlob().getDataAsString('utf-8') : '';
+        // skippedなら既存の .ocr.txt を読み込む（なければ空でOK→画像のみで抽出）
+        if (text === 'skipped') {
+          const it = parent.getFilesByName(file.getName() + '.ocr.txt');
+          text = it.hasNext() ? it.next().getBlob().getDataAsString('utf-8') : '';
+        }
+
+        // （任意）PoC抽出：text があれば .extracted.json を更新
+        if (text) {
+          const extracted = ocr_extractPayslip_(text);
+          ocr_saveExtraction_(file, extracted);
+        }
       }
 
-      // （任意）PoC抽出：text があれば .extracted.json を更新
-      if (text) {
-        const extracted = ocr_extractPayslip_(text);
-        ocr_saveExtraction_(file, extracted);
-      }
+      if (ENABLE_EXTRACT) {
+        // 画像URLを公開にして抽出APIにPOST（ocrTextは空でもOK）
+        const imageUrl = ensurePublicImageUrl_(file);
+        const out = postExtract_(s.id, imageUrl, text || '', meta.line_id);
 
-      // 画像URLを公開にして抽出APIにPOST（ocrTextは空でもOK）
-      const imageUrl = ensurePublicImageUrl_(file);
-      const out = postExtract_(s.id, imageUrl, text || '', meta.line_id);
-
-      // 成果物保存
-      if (out && out.ok && out.data) {
-        parent.createFile(
-          Utilities.newBlob(
-            JSON.stringify(out.data, null, 2),
-            'application/json',
-            s.id + '_model.json'
-          )
-        );
-      } else {
-        parent.createFile(
-          Utilities.newBlob(
-            `status=${out?.status}\n${out?.error || ''}\n\n${out?.raw || ''}`,
-            'text/plain',
-            s.id + '_extract_error.txt'
-          )
-        );
+        // 成果物保存
+        if (out && out.ok && out.data) {
+          parent.createFile(
+            Utilities.newBlob(
+              JSON.stringify(out.data, null, 2),
+              'application/json',
+              s.id + '_model.json'
+            )
+          );
+        } else {
+          parent.createFile(
+            Utilities.newBlob(
+              `status=${out?.status}\n${out?.error || ''}\n\n${out?.raw || ''}`,
+              'text/plain',
+              s.id + '_extract_error.txt'
+            )
+          );
+        }
       }
     });
   } catch (e) {
@@ -1585,11 +1794,13 @@ function cron_1min() {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(10 * 1000)) return;
   try {
-    if (typeof run_ProcessInbox_AllForms === 'function') {
-      run_ProcessInbox_AllForms();
-    } else {
-      ensureLabels();
-      processLabel(LABEL_TO_PROCESS);
+    ensureLabels();
+    const hasRouter = typeof run_ProcessInbox_AllForms === 'function';
+    Logger.log('[cron_1min] start router=%s', hasRouter);
+
+    processLabel(LABEL_TO_PROCESS, { onlyDocs: false, skipJson: hasRouter, markLabelName: LABEL_ATTACH_SAVED });
+    if (hasRouter) {
+      run_ProcessInbox_AllForms({ skipLock: true, caller: 'cron_1min' });
     }
   } catch (e) {
     console.error('cron_1min failed:', e);
@@ -1619,6 +1830,7 @@ function json_(obj, code) {
 
 function verifySig_(base, sigHex) {
   const secret = PropertiesService.getScriptProperties().getProperty('BOOTSTRAP_SECRET') || '';
+  if (!secret) return false;
   const raw = Utilities.computeHmacSha256Signature(String(base || ''), secret);
   const hex = raw.map((b) => ('0' + (b & 0xff).toString(16)).slice(-2)).join('');
   return hex === String(sigHex || '');

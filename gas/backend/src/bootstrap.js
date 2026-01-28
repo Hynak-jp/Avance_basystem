@@ -1109,7 +1109,7 @@ function doPost(e) {
     ).trim();
     const providedSig = providedSigRaw.replace(/=+$/, '');
 
-    // 確定デバッグ: ALLOW_DEBUG=1 のときのみ有効
+    // 確定デバッグ: ALLOW_DEBUG=1 かつ DEBUG_TOKEN 一致時のみ有効
     const wantDebug = String((qs || {}).debug ?? (body || {}).debug) === '1';
     if (wantDebug && !ALLOW_DEBUG) {
       return ContentService.createTextOutput(
@@ -1117,10 +1117,16 @@ function doPost(e) {
       ).setMimeType(ContentService.MimeType.JSON);
     }
     if (wantDebug && ALLOW_DEBUG) {
+      const debugToken = String((qs || {}).token ?? (body || {}).token ?? '').trim();
+      const expectedDebugToken = String(
+        PropertiesService.getScriptProperties().getProperty('DEBUG_TOKEN') || ''
+      ).trim();
+      if (!expectedDebugToken || debugToken !== expectedDebugToken) {
+        return ContentService.createTextOutput(
+          JSON.stringify({ ok: false, error: 'debug_forbidden', VER })
+        ).setMimeType(ContentService.MimeType.JSON);
+      }
       const SECRET = getSecret_();
-      const base = lineId + '|' + ts;
-      const raw = Utilities.computeHmacSha256Signature(base, SECRET, Utilities.Charset.UTF_8);
-      const expect = Utilities.base64EncodeWebSafe(raw).replace(/=+$/, '');
       const secretFP = Utilities.base64EncodeWebSafe(
         Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, SECRET, Utilities.Charset.UTF_8)
       )
@@ -1128,7 +1134,14 @@ function doPost(e) {
         .slice(0, 16);
 
       return ContentService.createTextOutput(
-        JSON.stringify({ ok: true, VER, base, lineId, ts, providedSig, expect, secretLen: SECRET.length, secretFP })
+        JSON.stringify({
+          ok: true,
+          VER,
+          lineId,
+          ts,
+          providedSigLen: String(providedSig || '').length,
+          secretFP,
+        })
       ).setMimeType(ContentService.MimeType.JSON);
     }
 
@@ -1162,7 +1175,9 @@ function doPost(e) {
         ).setMimeType(ContentService.MimeType.JSON);
       }
     } catch (_) {}
-    if (!(providedSig === expectB64Url || providedSig.toLowerCase() === expectHex)) {
+    const okB64 = safeCompare_(providedSig, expectB64Url);
+    const okHex = safeCompare_(String(providedSig || '').toLowerCase(), expectHex);
+    if (!(okB64 || okHex)) {
       try {
         if (String(action) === 'intake_complete') {
           bs_appendLog_([new Date(), 'fail_intake_bad_sig', lineId]);
@@ -1170,13 +1185,9 @@ function doPost(e) {
       } catch (_) {}
       return ContentService.createTextOutput(
         JSON.stringify({
+          ok: false,
           error: 'bad_sig',
           VER,
-          base,
-          providedSig: providedSigRaw,
-          expectB64Url,
-          expectHex,
-          secretLen: SECRET.length,
         })
       ).setMimeType(ContentService.MimeType.JSON);
     }
@@ -1330,6 +1341,25 @@ function doPost(e) {
 
       // _staging にある intake JSON を案件直下へ移送（存在すれば）
       bs_collectIntakeFromStaging_(lineId, activeCaseId, folderId);
+      // 添付の staging 統合（_email_staging / _staging）
+      try {
+        if (typeof reconcileStagingAttachmentsToCase_ === 'function') {
+          const moved = reconcileStagingAttachmentsToCase_(lineId, activeCaseId, email, {
+            caseFolderId: folderId,
+          });
+          try {
+            Logger.log(
+              '[intake_complete] attach merged email=%s staging=%s',
+              moved && moved.movedEmail,
+              moved && moved.movedStaging
+            );
+          } catch (_) {}
+        }
+      } catch (e) {
+        try {
+          Logger.log('[intake_complete] attach merge error: %s', (e && e.stack) || e);
+        } catch (_) {}
+      }
       const res = {
         ok: true,
         VER,

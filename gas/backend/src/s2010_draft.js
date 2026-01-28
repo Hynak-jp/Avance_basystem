@@ -373,6 +373,22 @@ function mergeS2010Parts_(parts, opt) {
       if (p1Model[k]) model[k] = p1Model[k];
     });
   }
+  const p2Model = s2010_pickP2Model_(parts);
+  if (p2Model) {
+    [
+      'reason',
+      'trigger',
+      'unable_yyyy',
+      'unable_mm',
+      'unable_monthly_total',
+      'notice_yyyy',
+      'notice_mm',
+      'notice_dd',
+      'circ',
+    ].forEach((k) => {
+      if (Object.prototype.hasOwnProperty.call(p2Model, k)) model[k] = p2Model[k];
+    });
+  }
 
   // 5) 統合メタ
   const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMddHHmmss');
@@ -576,45 +592,142 @@ function ensureS2010Model_(m) {
     if (lines.length) out.stmt.free = lines.join('\n\n');
   }
 
-  // 理由（複数選択想定）
-  const reasonsRaw = s2010_findFieldValue_(m, /理由は.*とおり|借金.*理由/);
-  const reasons = s2010_splitMulti_(reasonsRaw);
-  out.reason = {
-    living: s2010_hasAny_(reasons, /生活費/),
-    mortgage: s2010_hasAny_(reasons, /住宅ローン|住宅/),
-    education: s2010_hasAny_(reasons, /教育/),
-    waste: s2010_hasAny_(reasons, /浪費|飲食|飲酒|投資|投機|商品購入|ギャンブル/),
-    business: s2010_hasAny_(reasons, /事業|経営破綻|マルチ|ネットワーク/),
-    guarantee: s2010_hasAny_(reasons, /保証/),
-    other: s2010_hasAny_(reasons, /その他/),
-    other_text: s2010_pickOtherText_(reasonsRaw),
+  const isReasonEmpty = (r) => {
+    if (!r) return true;
+    const flags = ['living', 'mortgage', 'education', 'waste', 'business', 'guarantee', 'other'];
+    if (flags.some((k) => !!r[k])) return false;
+    return !String(r.other_text || '').trim();
   };
+  const isTriggerEmpty = (t) => {
+    if (!t) return true;
+    const flags = ['overpay', 'dismiss', 'paycut', 'hospital', 'other'];
+    if (flags.some((k) => !!t[k])) return false;
+    return !String(t.other_text || '').trim();
+  };
+
+  // 理由（複数選択想定）
+  if (isReasonEmpty(out.reason)) {
+    const reasonsRaw = s2010_findFieldValue_(
+      m,
+      /^(?:【\s*)?1\.\s*多額の借金をした理由\s*(?:】)?$/
+    );
+    const reasons = s2010_splitMulti_(reasonsRaw);
+    out.reason = {
+      living: s2010_hasAny_(reasons, /生活費/),
+      mortgage: s2010_hasAny_(reasons, /住宅ローン|住宅/),
+      education: s2010_hasAny_(reasons, /教育/),
+      waste: s2010_hasAny_(reasons, /浪費|飲食|飲酒|投資|投機|商品購入|ギャンブル/),
+      business: s2010_hasAny_(reasons, /事業|経営破綻|マルチ|ネットワーク/),
+      guarantee: s2010_hasAny_(reasons, /保証/),
+      other: s2010_hasAny_(reasons, /その他/),
+      other_text: s2010_pickOtherText_(reasonsRaw),
+    };
+  }
 
   // きっかけ（複数選択想定）
-  const triggersRaw = s2010_findFieldValue_(m, /きっかけ.*とおり|返済.*できなく.*きっかけ/);
-  const triggers = s2010_splitMulti_(triggersRaw);
-  out.trigger = {
-    overpay: s2010_hasAny_(triggers, /収入以上|返済金額/),
-    dismiss: s2010_hasAny_(triggers, /解雇/),
-    paycut: s2010_hasAny_(triggers, /減額/),
-    hospital: s2010_hasAny_(triggers, /病気|入院/),
-    other: s2010_hasAny_(triggers, /その他/),
-    other_text: s2010_pickOtherText_(triggersRaw),
-  };
+  if (isTriggerEmpty(out.trigger)) {
+    const triggersRaw = s2010_findFieldValue_(
+      m,
+      /^(?:【\s*)?2\.\s*返済できなくなったきっかけ\s*(?:】)?$/
+    );
+    const triggers = s2010_splitMulti_(triggersRaw);
+    out.trigger = {
+      overpay: s2010_hasAny_(triggers, /収入以上|返済金額/),
+      dismiss: s2010_hasAny_(triggers, /解雇/),
+      paycut: s2010_hasAny_(triggers, /減額/),
+      hospital: s2010_hasAny_(triggers, /病気|入院/),
+      other: s2010_hasAny_(triggers, /その他/),
+      other_text: s2010_pickOtherText_(triggersRaw),
+    };
+  }
+
+  if (!out.reason) out.reason = {};
+  if (!out.trigger) out.trigger = {};
+  const reasonOther = s2010_findFieldValue_(m, /多額の借金をした理由\s*[:：]\s*その他/);
+  if (reasonOther != null && String(reasonOther).trim()) {
+    out.reason.other_text = String(reasonOther).trim();
+    out.reason.other = true;
+  }
+  const triggerOther = s2010_findFieldValue_(m, /返済できなくなったきっかけ\s*[:：]\s*その他/);
+  if (triggerOther != null && String(triggerOther).trim()) {
+    out.trigger.other_text = String(triggerOther).trim();
+    out.trigger.other = true;
+  }
 
   // 支払不能の時期・約定返済合計・受任日（任意）
-  const unable = s2010_findFieldValue_(m, /支払不能.*時期/);
-  const unableYM = s2010_toYMP_(unable);
-  out.unable_yyyy = unableYM.yyyy || '';
-  out.unable_mm = unableYM.mm || '';
-  const monthly = s2010_findFieldValue_(m, /約定返済額|月々.*返済額/);
-  out.unable_monthly_total = s2010_toNumberText_(monthly);
+  const hasUnableDate = !!(out.unable_yyyy || out.unable_mm);
+  if (!hasUnableDate) {
+    const unable = s2010_findFieldValue_(m, /支払不能.*時期/);
+    const unableYM = s2010_toYMP_(unable);
+    out.unable_yyyy = unableYM.yyyy || '';
+    out.unable_mm = unableYM.mm || '';
+  }
+  if (!out.unable_monthly_total) {
+    const monthly = s2010_findFieldValue_(m, /約定返済額|月々.*返済額/);
+    out.unable_monthly_total = s2010_toNumberText_(monthly);
+  }
 
-  const notice = s2010_findFieldValue_(m, /受任通知.*発送日/);
-  const nd = s2010_toYMD_(notice);
-  out.notice_yyyy = nd.yyyy || '';
-  out.notice_mm = nd.mm || '';
-  out.notice_dd = nd.dd || '';
+  const hasNoticeDate = !!(out.notice_yyyy || out.notice_mm || out.notice_dd);
+  if (!hasNoticeDate) {
+    const notice = s2010_findFieldValue_(m, /受任通知.*発送日/);
+    const nd = s2010_toYMD_(notice);
+    out.notice_yyyy = nd.yyyy || '';
+    out.notice_mm = nd.mm || '';
+    out.notice_dd = nd.dd || '';
+  }
+
+  // 具体的事情（P2: 1〜6）
+  const circRows = Array.isArray(out.circ) ? out.circ : [];
+  const hasCircRows = circRows.some(function (row) {
+    return row && (row.yyyy || row.mm || row.dd || row.date_iso || row.text);
+  });
+  for (let i = 1; i <= 6; i++) {
+    let yyyy = '';
+    let mm = '';
+    let dd = '';
+    let dateIso = '';
+    let text = '';
+    if (hasCircRows) {
+      const row = circRows[i - 1] || {};
+      const hasParts = row.yyyy || row.mm || row.dd;
+      if (hasParts) {
+        yyyy = row.yyyy != null ? String(row.yyyy) : '';
+        mm = row.mm != null ? String(row.mm) : '';
+        dd = row.dd != null ? String(row.dd) : '';
+      } else if (row.date_iso) {
+        const ymd = s2010_toYMD_(row.date_iso);
+        yyyy = ymd.yyyy || '';
+        mm = ymd.mm || '';
+        dd = ymd.dd || '';
+      }
+      dateIso = String(row.date_iso || '');
+      text = String(row.text || '').trim();
+    } else {
+      const dateRe = new RegExp(`^\\s*(?:【\\s*)?${i}\\s*[：:]\\s*日付\\s*(?:】)?\\s*$`);
+      const textRe = new RegExp(`^\\s*(?:【\\s*)?${i}\\s*[：:]\\s*内容\\s*(?:】)?\\s*$`);
+      const dRaw = s2010_findFieldValue_(m, dateRe);
+      const tRaw = s2010_findFieldValue_(m, textRe);
+      const ymd = s2010_toYMD_(dRaw);
+      yyyy = ymd.yyyy || '';
+      mm = ymd.mm || '';
+      dd = ymd.dd || '';
+      text = String(tRaw || '').trim();
+      if (yyyy && mm && dd) dateIso = `${yyyy}-${s2010_pad2_(mm)}-${s2010_pad2_(dd)}`;
+      else if (yyyy && mm) dateIso = `${yyyy}-${s2010_pad2_(mm)}`;
+      else if (yyyy) dateIso = `${yyyy}`;
+    }
+    const mmPad = s2010_pad2_(mm || '');
+    const ddPad = s2010_pad2_(dd || '');
+    const dateText = yyyy ? `${yyyy}年${mmPad ? mmPad + '月' : ''}${ddPad ? ddPad + '日' : ''}` : '';
+    out[`circ${i}`] = {
+      date_iso: dateIso,
+      date: dateText,
+      text: text,
+      yyyy: yyyy || '',
+      mm: mmPad,
+      dd: ddPad,
+    };
+  }
 
   // ===== 職歴1（開始は常に入力あり。終了/現在は入力無しでもOK。無職でも開始だけ出す） =====
   const companyRaw = s2010_findFieldValue_(m, /職歴1.*(就業先|会社名|勤務先)/);
@@ -944,6 +1057,11 @@ function s2010_pickP1Model_(parts) {
   return found && found.json && found.json.model ? found.json.model : null;
 }
 
+function s2010_pickP2Model_(parts) {
+  const found = (parts || []).find((p) => String(getS2010FormKey_(p)) === 's2010_p2_cause');
+  return found && found.json && found.json.model ? found.json.model : null;
+}
+
 function s2010_pad2_(v) {
   return v ? String(v).padStart(2, '0') : '';
 }
@@ -1062,7 +1180,7 @@ function s2010_buildHouseholdFromP1_(rows) {
 function s2010_maritalFlags_(reason) {
   const s = String(reason || '');
   return {
-    marriage: /結婚/.test(s),
+    marriage: /結婚|婚姻/.test(s),
     divorce: /離婚/.test(s),
     commonlaw: /内縁(?!解消|終了)/.test(s),
     commonlaw_end: /内縁解消|内縁終了/.test(s),
@@ -1220,6 +1338,27 @@ function s2010_buildS2010PlaceholderMap_(m, parsed, logCtx) {
   setText('{{notice_mm}}', M.notice_mm || '');
   setText('{{notice_dd}}', M.notice_dd || '');
 
+  // concrete circumstances (circ1..circ6)
+  for (let i = 1; i <= 6; i++) {
+    const circ = M[`circ${i}`] || {};
+    const yyyyRaw = String(circ.yyyy || '').trim();
+    const mmRaw = String(circ.mm || '').trim().replace(/^0+/, '');
+    const ddRaw = String(circ.dd || '').trim().replace(/^0+/, '');
+    const yyyyText = yyyyRaw ? `${yyyyRaw}年` : '';
+    const mmText = mmRaw ? `${mmRaw}月` : '';
+    const ddText = ddRaw ? `${ddRaw}日` : '';
+    const dateLines = yyyyText ? [yyyyText, mmText, ddText].filter(Boolean).join('\n') : '';
+    setText(`{{circ${i}.date}}`, circ.date || '');
+    setText(`{{circ${i}.date_lines}}`, dateLines);
+    setText(`{{circ${i}.text}}`, String(circ.text || '').trim());
+    setText(`{{circ${i}.yyyy}}`, yyyyRaw);
+    setText(`{{circ${i}.mm}}`, mmRaw);
+    setText(`{{circ${i}.dd}}`, ddRaw);
+    setText(`{{circ${i}.yyyy}}年`, yyyyText);
+    setText(`{{circ${i}.mm}}月`, mmText);
+    setText(`{{circ${i}.dd}}日`, ddText);
+  }
+
   // jobs
   const jobs = Array.isArray(M.jobs) ? M.jobs : [];
   for (let i = 1; i <= 8; i++) {
@@ -1346,7 +1485,13 @@ function s2010_buildS2010PlaceholderMap_(m, parsed, logCtx) {
 
 function s2010_applyS2010Placeholders_(doc, map) {
   if (!doc || !map) return;
-  Object.keys(map)
+  const tokens = Object.keys(map);
+  const circSuffix = tokens.filter((token) => /{{circ\d+\.(yyyy|mm|dd)}}[年月日]$/.test(token));
+  const others = tokens.filter((token) => circSuffix.indexOf(token) < 0);
+  circSuffix.forEach(function (token) {
+    s2010_replaceAllEverywhere_(doc, token, map[token]);
+  });
+  others
     .sort()
     .forEach(function (token) {
       s2010_replaceAllEverywhere_(doc, token, map[token]);
@@ -1433,7 +1578,7 @@ function s2010_toYMD_(s) {
     return { yyyy: String(y), mm: era[3] ? String(era[3]) : '', dd: era[4] ? String(era[4]) : '' };
   }
   const m = str
-    .replace(/[年月]/g, '-')
+    .replace(/[年月日]/g, '-')
     .replace(/[.\/]/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
@@ -1445,8 +1590,15 @@ function s2010_toNumberText_(s) {
   return n ? n.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : '';
 }
 function s2010_toBoolJaLoose_(v) {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'number') return Number.isFinite(v) && v !== 0;
   const s = String(v || '').trim();
-  return /^(はい|有|あり|有り|true|当|○|チェック)$/i.test(s);
+  if (!s) return false;
+  const compact = s.replace(/\s+/g, '');
+  if (/^(0|０)+$/.test(compact)) return false;
+  if (/(無|なし|無し|いいえ|false|×|✕|✗)/i.test(compact)) return false;
+  if (/(有|あり|有り|はい|true|1|○|チェック|当)/i.test(compact)) return true;
+  return false;
 }
 function s2010_parseNameKanaValue_(raw) {
   const s = String(raw || '').trim();

@@ -10,6 +10,7 @@ const FORM_INTAKE_LABEL_ERROR = 'FormAttach/Error';
 const FORM_INTAKE_LABEL_NO_META = 'FormAttach/NoMeta';
 const FORM_INTAKE_LABEL_REJECTED = 'FormAttach/Rejected';
 const FORM_INTAKE_LABEL_LOCK = ''; // ScriptLockで排他するためラベルロックは廃止
+const FORM_INTAKE_LABEL_ATTACH_SAVED = 'FormAttach/AttachmentsSaved';
 
 // ===== FIELDS ブロック抽出（メール本文から） =====
 if (typeof parseFieldsBlock_ !== 'function') {
@@ -1397,10 +1398,17 @@ function formIntake_saveSubmissionJsonFallback_(folderId, parsed, formKey, submi
   return folder.createFile(blob);
 }
 
-function run_ProcessInbox_AllForms() {
+function run_ProcessInbox_AllForms(opts) {
+  opts = opts || {};
+  const skipLock = !!opts.skipLock;
   const scriptLock = LockService.getScriptLock();
-  if (!scriptLock.tryLock(30000)) return;
+  let lockAcquired = false;
+  if (!skipLock) {
+    if (!scriptLock.tryLock(30000)) return;
+    lockAcquired = true;
+  }
   try {
+    try { Logger.log('[router] start caller=%s', opts.caller || 'unknown'); } catch (_) {}
     const lockLabel = null;
     const processedLabelDefault = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_PROCESSED);
     const toProcessLabel = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_TO_PROCESS);
@@ -1416,7 +1424,7 @@ function run_ProcessInbox_AllForms() {
         const messages = thread.getMessages();
         if (!messages || !messages.length) return;
 
-        const msg = messages[0];
+        const msg = messages[messages.length - 1];
         let def = null;
         try {
           const body = msg.getPlainBody() || _htmlToText_(msg.getBody());
@@ -1471,6 +1479,28 @@ function run_ProcessInbox_AllForms() {
             return;
           }
 
+          // 通知secretガード（NOTIFY_SECRET または ENFORCE_EMAIL_GUARD=1 のときだけ）
+          try {
+            const P = PropertiesService.getScriptProperties();
+            const EXPECT = String(P.getProperty('NOTIFY_SECRET') || '').trim();
+            const ENFORCE = (P.getProperty('ENFORCE_EMAIL_GUARD') || '').trim() === '1';
+            if (ENFORCE || EXPECT) {
+              if (!EXPECT) {
+                try { Logger.log('[Guard] NOTIFY_SECRET missing; reject thread=%s', thread.getId && thread.getId()); } catch (_) {}
+                formIntake_markFailed_(thread, lockLabel, toProcessLabel, rejectedLabel);
+                return;
+              }
+              const provided = String((meta && meta.secret) || '').trim();
+              if (provided !== EXPECT) {
+                try { Logger.log('[Guard] secret mismatch'); } catch (_) {}
+                formIntake_markFailed_(thread, lockLabel, toProcessLabel, rejectedLabel);
+                return;
+              }
+            }
+          } catch (e) {
+            try { Logger.log('[Guard] error: %s', (e && e.stack) || e); } catch (_) {}
+          }
+
           const queueLabel = toProcessLabel;
           const processedLabel = def.processedLabel
             ? formIntake_labelOrCreate_(def.processedLabel)
@@ -1489,6 +1519,24 @@ function run_ProcessInbox_AllForms() {
                 return;
               }
             } catch (_) {}
+          }
+
+          // doc_ 系フォームの添付保存保険（AttachmentsSaved ラベルが無い場合のみ）
+          try {
+            if (/^doc_/i.test(actualKey)) {
+              const labels = thread.getLabels().map(function (l) { return l.getName(); });
+              if (labels.indexOf(FORM_INTAKE_LABEL_ATTACH_SAVED) < 0) {
+                if (typeof parseMetaAndFields === 'function' && typeof saveAttachmentsAndJson === 'function') {
+                  const parsedAttach = parseMetaAndFields(msg);
+                  if (!parsedAttach.form_name) parsedAttach.form_name = String(meta.form_name || '');
+                  saveAttachmentsAndJson(parsedAttach, msg, { skipJson: true });
+                  const attachLabel = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_ATTACH_SAVED);
+                  if (attachLabel) thread.addLabel(attachLabel);
+                }
+              }
+            }
+          } catch (e) {
+            try { Logger.log('[doc_attach] error: %s', (e && e.stack) || e); } catch (_) {}
           }
 
         const prepared = formIntake_prepareCaseInfo_(meta, def, parsed);
@@ -1766,6 +1814,14 @@ function run_ProcessInbox_AllForms() {
           updateCasesRow_(case_id, basePatch);
         }
 
+        try {
+          const attachSaved = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_ATTACH_SAVED);
+          if (attachSaved) thread.removeLabel(attachSaved);
+        } catch (_) {}
+        try {
+          const errLabel = formIntake_labelOrCreate_(FORM_INTAKE_LABEL_ERROR);
+          if (errLabel) thread.removeLabel(errLabel);
+        } catch (_) {}
         formIntake_cleanupLabels_(thread, queueLabel, lockLabel, processedLabel, toProcessLabel, true);
       } catch (err) {
         const defName = def && def.name ? def.name : 'unknown';
@@ -1799,9 +1855,11 @@ function run_ProcessInbox_AllForms() {
     });
     }
   } finally {
-    try {
-      scriptLock.releaseLock();
-    } catch (_) {}
+    if (lockAcquired) {
+      try {
+        scriptLock.releaseLock();
+      } catch (_) {}
+    }
   }
 }
 

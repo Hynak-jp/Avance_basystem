@@ -11,13 +11,14 @@
 
 ### GAS スクリプト
 
-- [x] Gmail → Drive 自動整理（ユーザーフォルダ作成、添付保存）
+- [x] Gmail → Drive 自動整理（添付保存パイプラインを `cron_1min` で併走）
 - [x] JSON 保存ルールをシンプル化（`formKey__submissionId.json`）
 - [x] 添付ファイルは `YYYYMM_TYPE[_n].ext` 命名でカテゴリ直下に保存
 - [x] OCR 抽出（.ocr.json, .model.json）まで稼働
 - [x] caseId 採番（ユーザー単位 4 桁連番）導入・運用開始（bootstrap 経由）
 - [x] WebApp `doPost` 実装（HMAC 署名検証）
 - [x] S2002 Intake メール取り込み → JSON 保存 → S2002 ドラフト生成（gdoc テンプレ差し込み）
+- [x] intake_complete 直後に `_email_staging/_staging` の添付を案件へ統合
 - [ ] S2002 の docx エクスポート（gdoc からのエクスポート処理）
 - [x] 時間主導トリガー整備（`cron_1min`, `run_ProcessInbox_S2002` を5分間隔で実行）
 

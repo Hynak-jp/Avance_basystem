@@ -17,13 +17,17 @@ const S2002_LABEL_PROCESSED = 'FormAttach/Processed';
  */
 function run_ProcessInbox_S2002() {
   // レガシー実行は共通ルーターへ委譲（Queue → ルーターの一括処理）
-  try { Logger.log('[S2002] delegate to common router (run_ProcessInbox_AllForms)'); } catch (_) {}
+  try {
+    Logger.log('[S2002] delegate to common router (run_ProcessInbox_AllForms)');
+  } catch (_) {}
   try {
     if (typeof run_ProcessInbox_AllForms === 'function') {
       run_ProcessInbox_AllForms();
     }
   } catch (e) {
-    try { Logger.log('[S2002] delegation error: %s', (e && e.stack) || e); } catch (_) {}
+    try {
+      Logger.log('[S2002] delegation error: %s', (e && e.stack) || e);
+    } catch (_) {}
   }
 }
 
@@ -151,6 +155,253 @@ function loadLatestSubmissionJson_(caseFolderId, _filePrefixIgnored) {
   const fieldsArr = normalizeFieldsArray_(latest);
   if (!fieldsArr) throw new Error('Invalid submission JSON shape (no fields/model)');
   return { meta: latest.meta || {}, fieldsRaw: fieldsArr, model: mapFieldsToModel_(fieldsArr) };
+}
+
+/**
+ * ケース直下の prefix*.json のうち「最初の intake」を選ぶ。
+ * 優先: intake__<submissionId>.json の submissionId 小さい順 → 作成日時が古い順
+ */
+function loadEarliestJsonByPrefix_(caseFolder, prefix) {
+  if (!caseFolder || !prefix) return null;
+  let folder = caseFolder;
+  if (typeof caseFolder === 'string') {
+    const id = normalizeFolderId_(caseFolder);
+    if (!id) return null;
+    try {
+      folder = DriveApp.getFolderById(id);
+    } catch (_) {
+      return null;
+    }
+  }
+  const it = folder.getFiles();
+  const picks = [];
+  const escaped = String(prefix).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const nameRe = new RegExp('^' + escaped + '(\\d+).*\\.json$', 'i');
+  while (it.hasNext()) {
+    const f = it.next();
+    const name = f.getName && f.getName();
+    if (!name || !/\.json$/i.test(name)) continue;
+    if (String(name).indexOf(prefix) !== 0) continue;
+    const m = String(name).match(nameRe);
+    const sid = m ? parseInt(m[1], 10) : NaN;
+    let created = 0;
+    try {
+      created = f.getDateCreated().getTime();
+    } catch (_) {
+      created = f.getLastUpdated().getTime();
+    }
+    picks.push({ file: f, sid: Number.isFinite(sid) ? sid : null, created: created });
+  }
+  if (!picks.length) return null;
+  picks.sort(function (a, b) {
+    const aHas = a.sid != null;
+    const bHas = b.sid != null;
+    if (aHas && bHas) {
+      if (a.sid !== b.sid) return a.sid - b.sid;
+    } else if (aHas && !bHas) {
+      return -1;
+    } else if (!aHas && bHas) {
+      return 1;
+    }
+    return a.created - b.created;
+  });
+  const pick = picks[0];
+  try {
+    return { file: pick.file, json: JSON.parse(pick.file.getBlob().getDataAsString('UTF-8')) };
+  } catch (_) {
+    return null;
+  }
+}
+
+function s2002_extractIntakeBaseInfo_(json) {
+  if (!json || typeof json !== 'object') return {};
+  const name = s2002_getByLabel_(
+    json,
+    [/申立人氏名/, /氏名/, /名前/],
+    [['app', 'name'], ['model', 'app', 'name'], ['applicant', 'name'], ['name'], ['applicant_name']]
+  );
+  const birth = s2002_getByLabel_(
+    json,
+    [/生年月日/],
+    [['app', 'birth'], ['model', 'app', 'birth'], ['birth'], ['birth_iso']]
+  );
+  let zip = s2002_getByLabel_(
+    json,
+    [/郵便/, /〒/],
+    [['addr', 'postal'], ['model', 'addr', 'postal'], ['postal'], ['zip'], ['zipcode']]
+  );
+  const addressPaths = [
+    ['addr', 'full'],
+    ['model', 'addr', 'full'],
+    ['address'],
+    ['addr', 'address'],
+    ['addr', 'residence'],
+  ];
+  const addressExact = s2002_getByLabel_(json, [/^【?\s*住居所\s*】?$/], []);
+  const addressFallback = s2002_getByLabel_(json, [/^(?!.*異なる).*住所/], []);
+  let address = addressExact || addressFallback;
+  if (!address) {
+    const directAddress = s2002_pickDirect_(json, addressPaths);
+    if (directAddress && !/異なる/.test(directAddress)) address = directAddress;
+  }
+  if (address) {
+    const p = parseAddressLine_(address);
+    if (!zip && p.postal) zip = p.postal;
+    address = s2002_stripZipFromAddress_(address);
+  }
+  const sameAsRaw = s2002_getByLabel_(
+    json,
+    [/(?=.*住民票)(?=.*記載)/, /住民票記載のとおり/, /住所.*住民票/],
+    []
+  );
+  const same_as_resident = toBoolJa_(sameAsRaw);
+  const phone = s2002_getByLabel_(
+    json,
+    [/電話番号/, /電話/, /連絡先/],
+    [['app', 'phone'], ['model', 'app', 'phone'], ['phone'], ['tel'], ['telephone']]
+  );
+  return {
+    name: String(name || '').trim(),
+    birth: String(birth || '').trim(),
+    zip: String(zip || '').trim(),
+    address: String(address || '').trim(),
+    same_as_resident: same_as_resident,
+    phone: String(phone || '').trim(),
+  };
+}
+
+function s2002_getByLabel_(json, regexes, directPaths) {
+  const list = Array.isArray(regexes) ? regexes : [regexes];
+  const direct = s2002_pickDirect_(json, directPaths);
+  if (direct) return direct;
+
+  const sources = [];
+  if (json.fields_indexed) sources.push(json.fields_indexed);
+  if (json.model && json.model.fields_indexed) sources.push(json.model.fields_indexed);
+  if (json.fieldsRaw) sources.push(json.fieldsRaw);
+  if (json.fields) sources.push(json.fields);
+  if (json.model && json.model.fields) sources.push(json.model.fields);
+  if (json.data) sources.push(json.data);
+
+  for (let i = 0; i < sources.length; i++) {
+    const hit = s2002_pickFromSource_(sources[i], list);
+    if (hit) return hit;
+  }
+  return '';
+}
+
+function s2002_pickDirect_(json, paths) {
+  const list = Array.isArray(paths) ? paths : [];
+  for (let i = 0; i < list.length; i++) {
+    const path = list[i];
+    let cur = json;
+    for (let j = 0; j < path.length; j++) {
+      if (!cur || typeof cur !== 'object') {
+        cur = null;
+        break;
+      }
+      cur = cur[path[j]];
+    }
+    if (cur != null && String(cur).trim()) return String(cur).trim();
+  }
+  return '';
+}
+
+function s2002_pickFromSource_(src, regexes) {
+  if (!src) return '';
+  if (Array.isArray(src)) {
+    for (let i = 0; i < src.length; i++) {
+      const it = src[i] || {};
+      const label = it.label || it.key || it.name || '';
+      const value = it.value != null ? it.value : it.text != null ? it.text : it.answer;
+      if (s2002_labelMatch_(label, regexes) && String(value || '').trim()) {
+        return String(value || '').trim();
+      }
+    }
+    return '';
+  }
+  if (typeof src === 'object') {
+    const keys = Object.keys(src);
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      const v = src[k];
+      const hasObj = v && typeof v === 'object';
+      const label = hasObj && v.label ? v.label : k;
+      let val = v;
+      if (hasObj) {
+        if (v.value != null) val = v.value;
+        else if (v.text != null) val = v.text;
+        else if (v.answer != null) val = v.answer;
+      }
+      if (
+        (s2002_labelMatch_(k, regexes) || s2002_labelMatch_(label, regexes)) &&
+        String(val || '').trim()
+      ) {
+        return String(val || '').trim();
+      }
+    }
+  }
+  return '';
+}
+
+function s2002_labelMatch_(label, regexes) {
+  const raw = String(label || '').trim();
+  const inner = raw.replace(/^【\s*|\s*】$/g, '').trim();
+  for (let i = 0; i < regexes.length; i++) {
+    const re = regexes[i];
+    if (re.test(raw) || re.test(inner)) return true;
+  }
+  return false;
+}
+
+function s2002_stripPostal_(v) {
+  let s = String(v || '').trim();
+  if (!s) return '';
+  s = s.replace(/[〒\s()（）]/g, '');
+  s = s.replace(/[０-９]/g, function (ch) {
+    return String.fromCharCode(ch.charCodeAt(0) - 0xfee0);
+  });
+  return s;
+}
+
+function s2002_stripZipFromAddress_(v) {
+  let s = String(v || '').trim();
+  if (!s) return '';
+  s = s.replace(/〒/g, ' ');
+  s = s.replace(/[0-9０-９]{3}[-－―‐ー]?[0-9０-９]{4}/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
+function s2002_normalizeZip_(v) {
+  const s = s2002_stripPostal_(v);
+  if (!s) return '';
+  const m = s.match(/(\d{3})-?(\d{4})/);
+  if (!m) return '';
+  return m[1] + '-' + m[2];
+}
+
+function s2002_buildResidenceBlock_(opts) {
+  const zip = s2002_normalizeZip_(opts && opts.zip);
+  const address = String((opts && opts.address) || '').trim();
+  if (zip && address) return '〒(' + zip + ') ' + address;
+  if (zip) return '〒(' + zip + ')';
+  return address;
+}
+
+function s2002_appendResidenceAfterZipIfMissing_(body, zip, address) {
+  const z = s2002_normalizeZip_(zip);
+  const addr = String(address || '').trim();
+  if (!body || !z || !addr) return;
+  const text = body.getText();
+  const textNorm = text.replace(/\s+/g, '');
+  const addrNorm = addr.replace(/\s+/g, '');
+  if (text.indexOf(addr) !== -1 || (addrNorm && textNorm.indexOf(addrNorm) !== -1)) return;
+  const token = '〒(' + z + ')';
+  if (text.indexOf(token) === -1) return;
+  // テンプレに住所プレースホルダが無い場合の保険（〒だけ残る不具合対策）
+  const safe = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  body.replaceText(safe, escapeReplaceTextValue_(token + ' ' + addr));
 }
 
 /**
@@ -475,8 +726,15 @@ function applyFieldLine_(label, value, out) {
   }
 
   if (/^【?個人事業者か】?/.test(label)) {
-    const v = value.trim();
-    out.ref.self_employed = v === 'いいえ' ? 'none' : v.includes('6') ? 'past6m' : 'current';
+    const v = String(value || '').trim();
+    if (!v) return;
+    if (v === 'いいえ') {
+      out.ref.self_employed = 'none';
+    } else if (/[6６]/.test(v)) {
+      out.ref.self_employed = 'past6m';
+    } else {
+      out.ref.self_employed = 'current';
+    }
     return;
   }
   if (/^【?法人の代表者ですか？】?/.test(label)) {
@@ -547,17 +805,21 @@ function normPhone_(s) {
   return t.replace(/(\d{2,4})(\d{2,4})(\d{3,4})/, '$1-$2-$3');
 }
 function toBoolJa_(v) {
-  return String(v).trim() === 'はい';
+  const s = String(v || '').trim();
+  if (!s) return null;
+  return s === 'はい';
 }
 function toIsoBirth_(ja) {
   // 例: 2000年01月01日 / 2000/1/1 / 2000.1.1 など
-  let s = String(ja)
+  let s = String(ja || '')
     .trim()
+    .replace(/生\s*$/, '')
     .replace(/[年月]/g, '-')
     .replace(/[日]/g, '')
     .replace(/[.\/\s]/g, '-')
     .replace(/-+/g, '-');
-  const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  s = s.replace(/[^0-9-]/g, '');
+  const m = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (!m) return '';
   const y = +m[1],
     mo = ('0' + m[2]).slice(-2),
@@ -577,11 +839,17 @@ function calcAge_(iso) {
 // 置換: 和暦対応を拡張
 function toWareki_(iso) {
   if (!iso) return null;
-  const d = new Date(iso);
+  const m = String(iso).match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (!m) return null;
+  const y = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10);
+  const d0 = parseInt(m[3], 10);
+  const d = new Date(y, mo - 1, d0);
+  if (d.getFullYear() !== y || d.getMonth() + 1 !== mo || d.getDate() !== d0) return null;
   const eras = [
-    { gengo: '令和', start: new Date('2019-05-01'), offset: 2018 },
-    { gengo: '平成', start: new Date('1989-01-08'), offset: 1988 },
-    { gengo: '昭和', start: new Date('1926-12-25'), offset: 1925 },
+    { gengo: '令和', start: new Date(2019, 4, 1), offset: 2018 },
+    { gengo: '平成', start: new Date(1989, 0, 8), offset: 1988 },
+    { gengo: '昭和', start: new Date(1926, 11, 25), offset: 1925 },
   ];
   for (const e of eras) {
     if (d >= e.start)
@@ -620,7 +888,8 @@ function sanitizeAltAddressValue_(v) {
 
 // 差し込み直前の最終クリーニング（全角スペースも半角へ、空白整形）
 function cleanAltAddress_(s) {
-  return normJaSpace_(sanitizeAltAddressValue_(s));
+  const cleaned = normJaSpace_(sanitizeAltAddressValue_(s));
+  return cleaned.replace(/^〒\s*/, '');
 }
 
 /** caseId を 4 桁ゼロ埋めの文字列に正規化（"1"→"0001"）。*/
@@ -676,7 +945,7 @@ function updateCasesRow_(caseId, patch) {
   const header = vals[0];
   const idxMap = bs_toIndexMap_(header);
   const idxCase = idxMap.case_id;
-  const idxKey  = idxMap.case_key;
+  const idxKey = idxMap.case_key;
   const idxLine = idxMap.line_id;
   // 列書式: case_id をテキスト('@')に固定（数値化防止）
   try {
@@ -722,22 +991,17 @@ function updateCasesRow_(caseId, patch) {
 function saveSubmissionJson_(caseFolderId, parsed) {
   const parent = DriveApp.getFolderById(caseFolderId);
   const tz =
-    (typeof Session !== 'undefined' &&
-      Session.getScriptTimeZone &&
-      Session.getScriptTimeZone()) ||
+    (typeof Session !== 'undefined' && Session.getScriptTimeZone && Session.getScriptTimeZone()) ||
     'Asia/Tokyo';
   let sid =
-    parsed && parsed.meta && parsed.meta.submission_id
-      ? String(parsed.meta.submission_id)
-      : '';
+    parsed && parsed.meta && parsed.meta.submission_id ? String(parsed.meta.submission_id) : '';
   sid = sid.replace(/[^\d]/g, '');
   if (!sid) {
     sid = Utilities.formatDate(new Date(), tz, 'yyyyMMddHHmmss');
   }
-  const safeKey = String(parsed && parsed.meta && parsed.meta.form_key ? parsed.meta.form_key : 'unknown').replace(
-    /[^a-z0-9_]/gi,
-    '_'
-  );
+  const safeKey = String(
+    parsed && parsed.meta && parsed.meta.form_key ? parsed.meta.form_key : 'unknown'
+  ).replace(/[^a-z0-9_]/gi, '_');
   const fname = `${safeKey}__${sid}.json`;
   const content = JSON.stringify(parsed, null, 2);
   let existing = null;
@@ -812,7 +1076,8 @@ function ensureCaseFolderId_(caseInfo) {
   // 2) caseKey から Drive ルート直下で検索/作成（妥当性チェックを追加）
   const ROOT_ID =
     PROP_S2002.getProperty('DRIVE_ROOT_FOLDER_ID') ||
-    PROP_S2002.getProperty('ROOT_FOLDER_ID') || '';
+    PROP_S2002.getProperty('ROOT_FOLDER_ID') ||
+    '';
   if (!ROOT_ID) throw new Error('ROOT_FOLDER_ID/DRIVE_ROOT_FOLDER_ID が未設定です');
   const root = DriveApp.getFolderById(ROOT_ID);
   let name = String(caseInfo.caseKey || '').trim();
@@ -869,7 +1134,9 @@ function extractDriveIdMaybe_(v) {
 function findBestCaseFolderUnderRoot_(name, preferId) {
   if (!name) return null;
   const ROOT_ID =
-    PROP_S2002.getProperty('DRIVE_ROOT_FOLDER_ID') || PROP_S2002.getProperty('ROOT_FOLDER_ID') || '';
+    PROP_S2002.getProperty('DRIVE_ROOT_FOLDER_ID') ||
+    PROP_S2002.getProperty('ROOT_FOLDER_ID') ||
+    '';
   if (!ROOT_ID) return null;
   const root = DriveApp.getFolderById(ROOT_ID);
   const it = root.getFoldersByName(name);
@@ -894,12 +1161,83 @@ function findBestCaseFolderUnderRoot_(name, preferId) {
 function generateS2002Draft_(caseInfo, parsed) {
   if (!S2002_TPL_GDOC_ID) throw new Error('S2002_TEMPLATE_GDOC_ID not set');
   // generateS2002Draft_ 内
-  const drafts = getOrCreateSubfolder_(DriveApp.getFolderById(caseInfo.folderId), 'drafts');
+  const caseFolder = DriveApp.getFolderById(caseInfo.folderId);
+  const drafts = getOrCreateSubfolder_(caseFolder, 'drafts');
   try {
     Logger.log('[S2002] draftsFolderId=%s caseFolderId=%s', drafts.getId(), caseInfo.folderId);
   } catch (_) {}
 
   const M = (parsed && parsed.model) || { app: {}, addr: {}, ref: {} };
+  const intake = loadEarliestJsonByPrefix_(caseFolder, 'intake__');
+  const intakeInfo = intake ? s2002_extractIntakeBaseInfo_(intake.json) : {};
+  const intakePickName = intake && intake.file && intake.file.getName ? intake.file.getName() : '';
+  try {
+    Logger.log('[S2002] intakePickName=%s intakePickFound=%s', intakePickName, !!intake);
+    Logger.log(
+      '[S2002] intakeSources flags name=%s birth=%s addr=%s phone=%s',
+      !!intakeInfo.name,
+      !!intakeInfo.birth,
+      !!intakeInfo.address,
+      !!intakeInfo.phone
+    );
+  } catch (_) {}
+
+  const app = Object.assign({}, M.app || {});
+  const addr = Object.assign({}, M.addr || {});
+
+  if (intakeInfo.name) app.name = normSpace_(intakeInfo.name);
+  if (intakeInfo.phone) app.phone = normPhone_(intakeInfo.phone);
+  if (intakeInfo.birth) {
+    const iso = toIsoBirth_(intakeInfo.birth);
+    if (iso) {
+      app.birth = intakeInfo.birth.trim();
+      app.birth_iso = iso;
+      app.age = calcAge_(iso);
+      const w0 = toWareki_(iso);
+      if (w0) app.birth_wareki = w0;
+    } else if (!app.birth) {
+      app.birth = intakeInfo.birth.trim();
+    }
+  }
+
+  const intakeZip = s2002_normalizeZip_(intakeInfo.zip);
+  const intakeAddr = intakeInfo.address ? normJaSpace_(intakeInfo.address) : '';
+  if (intakeAddr) addr.full = intakeAddr;
+  if (intakeZip) addr.postal = intakeZip;
+  if (addr.same_as_resident == null && intakeInfo.same_as_resident != null) {
+    addr.same_as_resident = intakeInfo.same_as_resident;
+  }
+  let residentFull = '';
+  if (addr.full) {
+    const p = parseAddressLine_(addr.full);
+    if (!addr.postal) addr.postal = p.postal || '';
+    if (p.pref_city) addr.pref_city = p.pref_city;
+    if (p.street) addr.street = p.street;
+    const fromParts = (p.pref_city || '') + (p.street ? ' ' + p.street : '');
+    residentFull = fromParts.trim() || normJaSpace_(addr.full);
+  }
+  if (!residentFull) {
+    const fallback = [addr.pref_city, addr.street].filter(Boolean).join(' ');
+    if (fallback) residentFull = fallback;
+  }
+  residentFull = s2002_stripZipFromAddress_(residentFull);
+  const residenceBlock = s2002_buildResidenceBlock_({ zip: addr.postal, address: residentFull });
+  let birthIsoForParts = app.birth_iso;
+  if (!birthIsoForParts) {
+    const srcBirth = app.birth || intakeInfo.birth || '';
+    birthIsoForParts = toIsoBirth_(srcBirth);
+    if (birthIsoForParts) app.birth_iso = birthIsoForParts;
+  }
+  try {
+    Logger.log(
+      '[S2002] afterMerge flags name=%s birth_iso=%s postal=%s full=%s phone=%s',
+      !!app.name,
+      !!app.birth_iso,
+      !!addr.postal,
+      !!addr.full,
+      !!app.phone
+    );
+  } catch (_) {}
 
   // テンプレ複製（履歴保全のため submission_id を付与推奨）
   const subId =
@@ -914,52 +1252,67 @@ function generateS2002Draft_(caseInfo, parsed) {
   const body = doc.getBody();
 
   // 申立人情報
-  replaceAll_(body, '{{app.name}}', M.app.name || '');
-  replaceAll_(body, '{{app.kana}}', M.app.kana || '');
-  replaceAll_(body, '{{app.maiden_name}}', M.app.maiden_name || '');
-  replaceAll_(body, '{{app.maiden_kana}}', M.app.maiden_kana || '');
-  replaceAll_(body, '{{app.nationality}}', M.app.nationality || '');
-  replaceAll_(body, '{{app.phone}}', M.app.phone || '');
-  replaceAll_(body, '{{app.age}}', (M.app.age ?? '') + '');
+  replaceAll_(body, '{{app.name}}', app.name || '');
+  replaceAll_(body, '{{app.kana}}', app.kana || '');
+  replaceAll_(body, '{{app.maiden_name}}', app.maiden_name || '');
+  replaceAll_(body, '{{app.maiden_kana}}', app.maiden_kana || '');
+  replaceAll_(body, '{{app.nationality}}', app.nationality || '');
+  replaceAll_(body, '{{app.phone}}', app.phone || '');
+  replaceAll_(body, '{{app.age}}', (app.age ?? '') + '');
 
   // 生年月日（西暦/元号）
-  if (M.app.birth_iso) {
-    const [yy, mm, dd] = M.app.birth_iso.split('-');
-    replaceAll_(body, '{{app.birth_yyyy}}', yy || '');
-    replaceAll_(body, '{{app.birth_mm}}', String(mm || ''));
-    replaceAll_(body, '{{app.birth_dd}}', String(dd || ''));
+  let birthY = '';
+  let birthM = '';
+  let birthD = '';
+  if (birthIsoForParts) {
+    const parts = birthIsoForParts.split('-');
+    birthY = parts[0] || '';
+    birthM = parts[1] || '';
+    birthD = parts[2] || '';
   }
+  replaceAll_(body, '{{app.birth_yyyy}}', birthY);
+  replaceAll_(body, '{{app.birth_mm}}', String(birthM || ''));
+  replaceAll_(body, '{{app.birth_dd}}', String(birthD || ''));
+  try {
+    Logger.log('[S2002] birthParts yyyy=%s mm=%s dd=%s', !!birthY, !!birthM, !!birthD);
+  } catch (_) {}
   // ★ここに追加（旧: if (M.app.birth_wareki) { ... } は削除）
-  const w = M.app.birth_wareki || null;
+  const w = app.birth_wareki || (birthIsoForParts ? toWareki_(birthIsoForParts) : null);
   replaceAll_(body, '{{app.birth_wareki_gengo}}', (w && w.gengo) || '');
   replaceAll_(body, '{{app.birth_wareki_yy}}', (w && String(w.yy)) || '');
 
   // 住所
-  const altClean0 = cleanAltAddress_(M.addr.alt_full);
+  const altClean0 = cleanAltAddress_(addr.alt_full);
   let altOut = altClean0;
-  if (!altOut && M.addr && M.addr.same_as_resident === false) {
-    // 住民票と異なるのに空 → 通常住所で埋める（空出力回避）
-    altOut = cleanAltAddress_(M.addr.full);
+  if (!altOut && addr && addr.same_as_resident === false) {
+    addr.same_as_resident = null;
   }
   try {
     Logger.log(
-      '[S2002] addr debug: same_as=%s alt_raw="%s" alt_out="%s"',
-      M.addr && M.addr.same_as_resident,
-      M.addr && M.addr.alt_full,
-      altOut
+      '[S2002] addr debug: same_as=%s alt_raw=%s alt_out=%s',
+      addr && addr.same_as_resident,
+      !!(addr && addr.alt_full),
+      !!altOut
     );
   } catch (_) {}
 
-  replaceAll_(body, '{{addr.postal}}', M.addr.postal || '');
-  replaceAll_(body, '{{addr.pref_city}}', M.addr.pref_city || '');
-  replaceAll_(body, '{{addr.street}}', M.addr.street || '');
+  replaceAll_(body, '{{addr.postal}}', addr.postal || '');
+  replaceAll_(body, '{{addr.pref_city}}', addr.pref_city || '');
+  replaceAll_(body, '{{addr.street}}', addr.street || '');
   replaceAll_(body, '{{addr.alt_full}}', altOut || '');
-  replaceAll_(body, '{{addr.same_as_resident}}', renderCheck_(!!M.addr.same_as_resident));
-  replaceAll_(body, '{{addr.same_as_resident_no}}', renderCheck_(!M.addr.same_as_resident));
+  replaceAll_(body, '{{addr.same_as_resident}}', renderCheck_(addr.same_as_resident === true));
+  replaceAll_(body, '{{addr.same_as_resident_no}}', renderCheck_(addr.same_as_resident === false));
+  replaceAll_(body, '{{addr.zip}}', addr.postal || '');
+  replaceAll_(body, '{{addr.address}}', addr.full || '');
+  replaceAll_(body, '{{addr.full}}', addr.full || '');
+  replaceAll_(body, '{{addr.resident_full}}', residentFull || '');
+  replaceAll_(body, '{{addr.residence_block}}', residenceBlock || '');
+  replaceAll_(body, '{{addr.residence}}', residenceBlock || '');
+  s2002_appendResidenceAfterZipIfMissing_(body, addr.postal, residentFull);
 
   // 本籍・国籍（本籍は固定チェック、国籍は入力があれば☑）
   replaceAll_(body, '{{ref.domicile_resident}}', renderCheck_(true));
-  replaceAll_(body, '{{ref.nationality}}', renderCheck_(!!M.app.nationality));
+  replaceAll_(body, '{{ref.nationality}}', renderCheck_(!!app.nationality));
 
   // 個人事業者か（3択）
   replaceAll_(body, '{{ref.self_employed_none}}', renderCheck_(M.ref.self_employed === 'none'));
@@ -971,8 +1324,16 @@ function generateS2002Draft_(caseInfo, parsed) {
   );
 
   // 法人代表者（有／無）
-  replaceAll_(body, '{{ref.corp_representative}}', renderCheck_(!!M.ref.corp_representative));
-  replaceAll_(body, '{{ref.corp_representative_no}}', renderCheck_(!M.ref.corp_representative));
+  replaceAll_(
+    body,
+    '{{ref.corp_representative}}',
+    renderCheck_(M.ref.corp_representative === true)
+  );
+  replaceAll_(
+    body,
+    '{{ref.corp_representative_no}}',
+    renderCheck_(M.ref.corp_representative === false)
+  );
 
   // その法人の破産申立て（4択）
   replaceAll_(
@@ -997,23 +1358,27 @@ function generateS2002Draft_(caseInfo, parsed) {
   );
 
   // 生活保護（有／無）
-  replaceAll_(body, '{{ref.welfare}}', renderCheck_(!!M.ref.welfare));
-  replaceAll_(body, '{{ref.welfare_no}}', renderCheck_(!M.ref.welfare));
+  replaceAll_(body, '{{ref.welfare}}', renderCheck_(M.ref.welfare === true));
+  replaceAll_(body, '{{ref.welfare_no}}', renderCheck_(M.ref.welfare === false));
 
   // 個人再生7年内（有／無）
-  replaceAll_(body, '{{ref.pr_rehab_within7y}}', renderCheck_(!!M.ref.pr_rehab_within7y));
-  replaceAll_(body, '{{ref.pr_rehab_within7y_no}}', renderCheck_(!M.ref.pr_rehab_within7y));
+  replaceAll_(body, '{{ref.pr_rehab_within7y}}', renderCheck_(M.ref.pr_rehab_within7y === true));
+  replaceAll_(
+    body,
+    '{{ref.pr_rehab_within7y_no}}',
+    renderCheck_(M.ref.pr_rehab_within7y === false)
+  );
 
   // 免責7年内（有／無）
   replaceAll_(
     body,
     '{{ref.bankruptcy_discharge_within7y}}',
-    renderCheck_(!!M.ref.bankruptcy_discharge_within7y)
+    renderCheck_(M.ref.bankruptcy_discharge_within7y === true)
   );
   replaceAll_(
     body,
     '{{ref.bankruptcy_discharge_within7y_no}}',
-    renderCheck_(!M.ref.bankruptcy_discharge_within7y)
+    renderCheck_(M.ref.bankruptcy_discharge_within7y === false)
   );
 
   // 文末
@@ -1024,7 +1389,10 @@ function generateS2002Draft_(caseInfo, parsed) {
 /** ====== 置換ユーティリティ ====== **/
 function replaceAll_(body, token, value) {
   const safe = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  body.replaceText(safe, String(value ?? ''));
+  body.replaceText(safe, escapeReplaceTextValue_(value));
+}
+function escapeReplaceTextValue_(value) {
+  return String(value ?? '').replace(/\$/g, '$$$$');
 }
 function renderCheck_(b) {
   return b ? '☑' : '□';
