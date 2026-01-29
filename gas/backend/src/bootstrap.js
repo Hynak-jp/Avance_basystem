@@ -1344,8 +1344,10 @@ function doPost(e) {
       // 添付の staging 統合（_email_staging / _staging）
       try {
         if (typeof reconcileStagingAttachmentsToCase_ === 'function') {
+          const caseKey = userKey + '-' + activeCaseId;
           const moved = reconcileStagingAttachmentsToCase_(lineId, activeCaseId, email, {
             caseFolderId: folderId,
+            caseKey: caseKey,
           });
           try {
             Logger.log(

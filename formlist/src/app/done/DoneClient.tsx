@@ -112,6 +112,7 @@ export default function DoneClient({ lineId }: { lineId: string }) {
     const markDone = (key: string | null | undefined) => {
       if (!key || key === 'unknown') return;
       if (cancelled) return;
+      if (String(key).toLowerCase() === 'doc_payslip') return;
       store.setStatus(key, 'done');
     };
 

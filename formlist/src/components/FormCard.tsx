@@ -38,6 +38,7 @@ export default function FormCard({
   serverStatus,
 }: Props) {
   const progressKey = storeKey || formKey || formId;
+  const isRepeatableDoc = String(progressKey).toLowerCase() === 'doc_payslip';
   const store = makeProgressStore(lineId)();
   const savedEmail = useUserEmailStore((state) => state.email);
   const savedOwnerLineId = useUserEmailStore((state) => state.ownerLineId);
@@ -114,10 +115,10 @@ export default function FormCard({
     }
   };
 
-  const overrideDone = completed ?? false;
+  const overrideDone = !isRepeatableDoc && (completed ?? false);
   let effectiveStatus: FormStatus = overrideDone ? 'done' : status;
 
-  if (serverStatus) {
+  if (serverStatus && !isRepeatableDoc) {
     if (!serverStatus.canEdit && (serverStatus.status === 'submitted' || serverStatus.status === 'closed')) {
       effectiveStatus = 'done';
     } else if (serverStatus.status === 'reopened' && effectiveStatus === 'done') {
@@ -125,8 +126,9 @@ export default function FormCard({
     }
   }
 
-  const isDone = effectiveStatus === 'done';
-  const serverCanEdit = !isIntakeForm && serverStatus ? serverStatus.canEdit : undefined;
+  const isDone = !isRepeatableDoc && effectiveStatus === 'done';
+  const serverCanEdit =
+    !isIntakeForm && !isRepeatableDoc && serverStatus ? serverStatus.canEdit : undefined;
   const baseDisabled = internalDisabled || !signedHref;
   const finalDisabled = serverCanEdit !== undefined ? !serverCanEdit || !signedHref : baseDisabled;
   const needsCaseId = !isIntakeForm;
@@ -156,7 +158,7 @@ export default function FormCard({
     label = '（未入力）';
   }
 
-  if (serverStatus) {
+  if (serverStatus && !isRepeatableDoc) {
     if (!serverStatus.canEdit && (serverStatus.status === 'submitted' || serverStatus.status === 'closed')) {
       label = '（送信済み）';
     } else if (serverStatus.status === 'reopened') {

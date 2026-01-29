@@ -233,6 +233,7 @@ export default async function FormPage() {
     if (isIntakeForm) redirectUrl.searchParams.set('form', 'intake');
     const redirectForForm = redirectUrl.toString();
     const allowPrefill = f.formKey === 's2002_userform';
+    const caseKeyQueryKeys = f.formKey === 'doc_payslip' ? ['case_key[0]'] : undefined;
     const extraPrefill =
       f.formKey === 's2002_userform' && userEmail
         ? {
@@ -251,6 +252,7 @@ export default async function FormPage() {
                 extraPrefill,
                 lineIdQueryKeys: ['line_id[0]'],
                 caseIdQueryKeys: ['case_id[0]'],
+                caseKeyQueryKeys,
               })
             : makeIntakeUrl(intakeBase, redirectForForm, lineId!, {
                 formId: f.formId,
@@ -265,6 +267,7 @@ export default async function FormPage() {
           extraPrefill,
           lineIdQueryKeys: [],
           caseIdQueryKeys: ['case_id[0]'],
+          caseKeyQueryKeys,
         });
       }
     }

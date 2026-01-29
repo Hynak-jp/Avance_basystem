@@ -28,6 +28,17 @@ const normalizeCaseId = (raw: string) => {
   if (!onlyDigits) return '';
   return onlyDigits.padStart(4, '0');
 };
+const normalizeUserKey = (lineId: string) => {
+  if (!lineId) return '';
+  const cleaned = lineId.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return cleaned.slice(0, 6);
+};
+const makeCaseKey = (lineId: string, caseId: string) => {
+  const userKey = normalizeUserKey(lineId);
+  const normalizedCaseId = normalizeCaseId(caseId);
+  if (userKey.length !== 6 || !normalizedCaseId) return '';
+  return `${userKey}-${normalizedCaseId}`;
+};
 const toIdx0 = (name?: string) => (name ? (/\[\d+\]$/.test(name) ? name : `${name}[0]`) : undefined);
 const assertNoLegacyParams = (u: URL) => {
   const bad = ['case_id', 'line_id', 'redirect_url', 'referrer'].filter((k) => u.searchParams.has(k));
@@ -65,6 +76,7 @@ type MakeFormUrlOptions = {
   extraPrefill?: Record<string, PrefillValue>;
   lineIdQueryKeys?: string[]; // フォームが参照できるクエリ名（デフォルト: line_id）
   caseIdQueryKeys?: string[]; // フォームが参照できるクエリ名（デフォルト: case_id）
+  caseKeyQueryKeys?: string[]; // フォームが参照できるクエリ名（例: case_key）
   redirectUrlQueryKey?: string; // FormMailer 側の redirect_url 指定キー（デフォルト: redirect_url[0]）
   referrerQueryKey?: string; // FormMailer 側の referrer 指定キー（デフォルト: referrer[0]）
 };
@@ -114,6 +126,7 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opt
   assertNoLegacyParams(url);
   const lineIdKeys = (opts.lineIdQueryKeys ?? ['line_id']).map(toIdx0).filter((k): k is string => Boolean(k));
   const caseIdKeys = (opts.caseIdQueryKeys ?? ['case_id']).map(toIdx0).filter((k): k is string => Boolean(k));
+  const caseKeyKeys = (opts.caseKeyQueryKeys ?? []).map(toIdx0).filter((k): k is string => Boolean(k));
   const redirectKey = toIdx0(opts.redirectUrlQueryKey ?? 'redirect_url');
   const referrerKey = toIdx0(opts.referrerQueryKey ?? 'referrer');
   lineIdKeys.forEach((key) => {
@@ -121,6 +134,10 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opt
   });
   caseIdKeys.forEach((key) => {
     if (normalizedCaseId) url.searchParams.set(key, normalizedCaseId);
+  });
+  caseKeyKeys.forEach((key) => {
+    const caseKey = makeCaseKey(lineId, normalizedCaseId);
+    if (caseKey) url.searchParams.set(key, caseKey);
   });
   let prefillSource: Record<string, PrefillValue> | undefined;
   if (opts.prefill) {

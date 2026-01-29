@@ -252,13 +252,25 @@ function saveSubmissionJsonShallow_(
   mailPlainBody,
   fields,
   subject,
-  lineId
+  lineId,
+  caseId,
+  caseKey
 ) {
   const formKey = resolveFormKeyFinal_(mailPlainBody, fields, subject);
-  const caseId = resolveCaseId_(mailPlainBody, subject, lineId);
+  const caseIdValue = String(caseId || '').trim() || resolveCaseId_(mailPlainBody, subject, lineId);
+  const caseKeyValue = String(caseKey || '').trim();
   const name = `${formKey}__${submissionId}.json`;
   const payload = JSON.stringify(
-    { submission_id: submissionId, meta: { form_key: formKey, case_id: caseId, subject }, fields },
+    {
+      submission_id: submissionId,
+      meta: {
+        form_key: formKey,
+        case_id: caseIdValue,
+        case_key: caseKeyValue,
+        subject,
+      },
+      fields,
+    },
     null,
     2
   );
@@ -303,6 +315,40 @@ function uniqueNameInFolder_(folder, baseName, ext) {
     i++;
   }
   return name;
+}
+
+/** doc_payslip の同名衝突回避（content_hash一致はスキップ、上限超はタイムスタンプ） */
+function resolveDocPayslipFilename_(folder, baseName, ext, contentHash, receivedAt) {
+  const safeExt = ext || 'bin';
+  const base = `${baseName}.${safeExt}`;
+  const pickHash = (file) => {
+    try {
+      return attachmentDescValue_(file.getDescription() || '', 'content_hash');
+    } catch (_) {
+      const m = (file.getDescription() || '').match(/content_hash=([0-9a-f]{64})/i);
+      return m ? m[1] : '';
+    }
+  };
+  const same = folder.getFilesByName(base);
+  if (same.hasNext()) {
+    const ex = same.next();
+    const exHash = pickHash(ex);
+    if (exHash && contentHash && exHash === contentHash) {
+      return { skip: true, file: ex };
+    }
+  }
+  for (let i = 2; i <= 99; i++) {
+    const name = `${baseName}_${i}.${safeExt}`;
+    const it = folder.getFilesByName(name);
+    if (!it.hasNext()) return { name };
+    const ex = it.next();
+    const exHash = pickHash(ex);
+    if (exHash && contentHash && exHash === contentHash) {
+      return { skip: true, file: ex };
+    }
+  }
+  const ts = Utilities.formatDate(receivedAt || new Date(), ASIA_TOKYO, 'yyyyMMdd-HHmmss');
+  return { name: `${baseName}_${ts}.${safeExt}` };
 }
 
 /**
@@ -421,6 +467,32 @@ function normalizeSubmissionIdStrict_(s) {
   return '';
 }
 
+function normalizeCaseId4_(s) {
+  const digits = String(s || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.length > 4) return '';
+  return digits.padStart(4, '0');
+}
+
+function normalizeCaseKeyStrict_(s) {
+  const raw = String(s || '').trim().toLowerCase();
+  if (!/^[a-z0-9]{6}-\d{4}$/.test(raw)) return '';
+  return raw;
+}
+function normalizeCaseKeyLoose_(s) {
+  const raw = String(s || '').trim().toLowerCase();
+  if (!/^[a-z0-9]{2,6}-\d{4}$/.test(raw)) return '';
+  return raw;
+}
+
+function drive_getCaseFolderByKey_(caseKey) {
+  const key = String(caseKey || '').trim();
+  if (!key) return null;
+  const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+  const it = root.getFoldersByName(key);
+  return it.hasNext() ? it.next() : null;
+}
+
 function getOrCreateFolder(parent, name) {
   const nm = sanitize(name || 'unknown');
   const it = parent.getFoldersByName(nm);
@@ -443,6 +515,26 @@ function caseKey_(lineId, caseId) {
 function ensureCaseFolder_(lineId, caseId) {
   const key = caseKey_(lineId, caseId);
   const folder = drive_getOrCreateCaseFolderByKey_(key);
+  getOrCreateFolder(folder, 'attachments');
+  getOrCreateFolder(folder, 'staff_inputs');
+  getOrCreateFolder(folder, 'drafts');
+  return folder;
+}
+/** caseKey 直下を用意（必要なら作成） */
+function ensureCaseFolderByCaseKey_(caseKey) {
+  const key = String(caseKey || '').trim().toLowerCase();
+  if (!key) return null;
+  let folder = null;
+  try {
+    if (typeof drive_getOrCreateCaseFolderByKey_ === 'function') {
+      folder = drive_getOrCreateCaseFolderByKey_(key);
+    }
+  } catch (_) {}
+  if (!folder) {
+    const root = DriveApp.getFolderById(ROOT_FOLDER_ID);
+    const it = root.getFoldersByName(key);
+    folder = it.hasNext() ? it.next() : root.createFolder(key);
+  }
   getOrCreateFolder(folder, 'attachments');
   getOrCreateFolder(folder, 'staff_inputs');
   getOrCreateFolder(folder, 'drafts');
@@ -818,6 +910,7 @@ function reconcileEmailStagingAllMonthsToCase_(attachRoot, email) {
 function reconcileStagingAttachmentsToCase_(lineId, caseId, email, opts) {
   opts = opts || {};
   const folderId = opts.caseFolderId || opts.folderId || '';
+  const wantCaseKey = normalizeCaseKeyStrict_(opts.caseKey || '');
   let caseFolder = opts.caseFolder || null;
   if (!caseFolder && folderId) {
     try { caseFolder = DriveApp.getFolderById(folderId); } catch (_) { caseFolder = null; }
@@ -852,7 +945,9 @@ function reconcileStagingAttachmentsToCase_(lineId, caseId, email, opts) {
         const desc = f.getDescription() || '';
         const lineInDesc = attachmentDescValue_(desc, 'line_id');
         const emailHashInDesc = attachmentDescValue_(desc, 'email_hash');
+        const caseKeyInDesc = normalizeCaseKeyStrict_(attachmentDescValue_(desc, 'case_key'));
         if (
+          (wantCaseKey && caseKeyInDesc && caseKeyInDesc === wantCaseKey) ||
           (wantLineId && lineInDesc && lineInDesc === wantLineId) ||
           (wantEmailHash && emailHashInDesc && emailHashInDesc === wantEmailHash)
         ) {
@@ -1078,6 +1173,7 @@ function parseMetaAndFields(msg) {
   const metaBlock = (body.match(RX_META_BLOCK) || [])[1] || '';
   const meta = {};
   let m;
+  RX_META_KV.lastIndex = 0;
   while ((m = RX_META_KV.exec(metaBlock)) !== null) {
     meta[m[1].toLowerCase()] = m[2];
   }
@@ -1086,6 +1182,7 @@ function parseMetaAndFields(msg) {
   const fields = {};
   let f;
   const fieldsBlock = (body.match(RX_FIELDS_BLOCK) || [])[1] || '';
+  RX_FIELD_LINE.lastIndex = 0;
   while ((f = RX_FIELD_LINE.exec(fieldsBlock)) !== null) {
     const label = sanitize(f[1]);
     fields[label] = f[2] || '';
@@ -1103,6 +1200,8 @@ function parseMetaAndFields(msg) {
   }
 
   const line_id = sanitize(meta.line_id || subjectLine || '');
+  const case_id = String(meta.case_id || '').trim();
+  const case_key = String(meta.case_key || '').trim();
   const form_name = sanitize(meta.form_name || '');
   const submission_id_raw = meta.submission_id || subjectSid || '';
   const submission_id = normalizeSubmissionIdStrict_(submission_id_raw);
@@ -1115,6 +1214,8 @@ function parseMetaAndFields(msg) {
     subject,
     body,
     line_id,
+    case_id,
+    case_key,
     form_name,
     submission_id,
     submitted_at,
@@ -1228,12 +1329,41 @@ function saveAttachmentsAndJson(meta, msg, opts) {
   meta.submission_id = submissionId;
   const display = pickDisplayName(meta.fields);
   const body = meta.body || msg.getPlainBody() || msg.getBody() || '';
+  const metaFromBody = parseMetaBlock_(body) || {};
+  const formKey = String(meta.form_key || meta.formKey || '').trim().toLowerCase();
+  const isDocPayslip = formKey === 'doc_payslip';
+  const rawCaseKey =
+    meta.case_key ||
+    meta.caseKey ||
+    metaFromBody.case_key ||
+    metaFromBody.caseKey ||
+    '';
+  const rawCaseId =
+    meta.case_id ||
+    meta.caseId ||
+    metaFromBody.case_id ||
+    metaFromBody.caseId ||
+    '';
+  let caseKey = normalizeCaseKeyLoose_(rawCaseKey);
+  let caseId = normalizeCaseId4_(rawCaseId);
+  if (!caseId) {
+    caseId = normalizeCaseId4_(resolveCaseId_(body, meta.subject || '', meta.line_id || ''));
+  }
+  if (!caseId && caseKey) {
+    const parts = caseKey.split('-');
+    if (parts.length === 2) caseId = parts[1];
+  }
+  const caseIdFromMeta = normalizeCaseId4_(rawCaseId);
+  const caseKeySuffix = caseKey ? caseKey.split('-').pop() : '';
+  const forceStaging = caseKey && caseIdFromMeta && caseKeySuffix && caseKeySuffix !== caseIdFromMeta;
+  if (forceStaging) caseKey = '';
+  const caseFolderByKey = caseKey && !forceStaging ? ensureCaseFolderByCaseKey_(caseKey) : null;
 
   // LINEが分かった & メールも分かる場合は、先に email_staging を案件フォルダ(attachments/)へ統合
   const emailNow = pickEmail(meta.fields);
   if (meta.line_id && emailNow) {
     try {
-      const caseIdForMerge = resolveCaseId_(body, meta.subject || '', meta.line_id || '');
+      const caseIdForMerge = caseId || resolveCaseId_(body, meta.subject || '', meta.line_id || '');
       if (caseIdForMerge)
         reconcileEmailStagingToCase_(meta.line_id, caseIdForMerge, emailNow, submitYm);
     } catch (_) {}
@@ -1263,12 +1393,15 @@ function saveAttachmentsAndJson(meta, msg, opts) {
     const typeName = rule.folder;
     const period = yyyymmFromDate_(when);
 
-    // 2) 保存先のベース（caseKey フォルダに統一）
+    // 2) 保存先のベース（doc_payslip の caseKey を優先）
     const email = pickEmail(meta.fields);
     const emailH = emailHash_(email);
-    const caseId = resolveCaseId_(body, meta.subject || '', meta.line_id || '');
-    let caseFolder, baseFolder;
-    if (meta.line_id && caseId) {
+    let caseFolder = null;
+    let baseFolder = null;
+    if (caseFolderByKey) {
+      caseFolder = caseFolderByKey;
+      baseFolder = getOrCreateFolder(caseFolder, 'attachments');
+    } else if (!forceStaging && meta.line_id && caseId) {
       caseFolder = ensureCaseFolder_(meta.line_id, caseId);
       baseFolder = getOrCreateFolder(caseFolder, 'attachments');
     } else if (emailH) {
@@ -1316,11 +1449,60 @@ function saveAttachmentsAndJson(meta, msg, opts) {
       });
       return;
     }
-    // 5) 保存（saveAttachmentShallow_を使用）
-    const file = saveAttachmentShallow_(baseFolder, blob, {
-      hintedType: typeCode,
-      receivedAt: when,
-    });
+    // 5) 保存（doc_payslip は同名衝突を厳密回避）
+    let file = null;
+    if (isDocPayslip) {
+      const extSafe =
+        ext ||
+        String(att.getName() || '')
+          .split('.')
+          .pop()
+          ?.toLowerCase() ||
+        'bin';
+      const baseName = `${yyyymmFromDate_(when)}_${typeCode}`;
+      const resolved = resolveDocPayslipFilename_(dest, baseName, extSafe, cHash, when);
+      if (resolved && resolved.skip) {
+        const existedDoc = resolved.file;
+        appendSubmissionLog_({
+          line_id: meta.line_id || '',
+          email: pickEmail(meta.fields) || '',
+          submission_id: submissionId,
+          form_name: meta.form_name || '',
+          submit_ym: submitYm,
+          doc_code: typeCode,
+          period_yyyymm: period || '',
+          drive_file_id: existedDoc.getId(),
+          file_name: existedDoc.getName(),
+          folder_path: dest.getName(),
+          content_hash: cHash || '',
+        });
+        upsertContactLegacy_({
+          line_id: meta.line_id || '',
+          email: pickEmail(meta.fields) || '',
+          display_name: display || '',
+          last_form: meta.form_name || '',
+          last_submit_ym: submitYm,
+        });
+        saved.push({
+          id: existedDoc.getId(),
+          name: existedDoc.getName(),
+          size: existedDoc.getSize(),
+          folderId: dest.getId(),
+          doc_type: typeName,
+          doc_code: typeCode,
+          period_yyyymm: period || '',
+          dedup: true,
+        });
+        return;
+      }
+      file = dest.createFile(blob);
+      file.setName(resolved.name);
+    } else {
+      file = saveAttachmentShallow_(baseFolder, blob, {
+        hintedType: typeCode,
+        receivedAt: when,
+      });
+    }
     file.setDescription(
       [
         `original=${original}`,
@@ -1331,6 +1513,8 @@ function saveAttachmentsAndJson(meta, msg, opts) {
         `submission_id=${submissionId}`,
         `form_id=${meta.form_name || ''}`,
         `line_id=${meta.line_id || ''}`,
+        `case_key=${caseKey || ''}`,
+        `case_id=${caseId || ''}`,
         `email=${email || ''}`,
         `email_hash=${emailH || ''}`,
         `staged=${meta.line_id ? 'false' : email ? 'email' : 'true'}`,
@@ -1374,9 +1558,11 @@ function saveAttachmentsAndJson(meta, msg, opts) {
   // 7) JSON保存：案件フォルダ直下へ <formkey>__<submissionId>.json（LINEなし時は従来どおり）
   let jsonParent;
   let folderIdForReturn = '';
-  const caseIdForJson = resolveCaseId_(body, meta.subject || '', meta.line_id || '');
-  if (meta.line_id && caseIdForJson) {
-    const cf = ensureCaseFolder_(meta.line_id, caseIdForJson);
+  if (caseKey && caseFolderByKey) {
+    jsonParent = caseFolderByKey;
+    folderIdForReturn = caseFolderByKey.getId();
+  } else if (meta.line_id && caseId) {
+    const cf = ensureCaseFolder_(meta.line_id, caseId);
     jsonParent = cf;
     folderIdForReturn = cf.getId();
   } else {
@@ -1398,7 +1584,9 @@ function saveAttachmentsAndJson(meta, msg, opts) {
       body,
       meta.fields,
       meta.subject || '',
-      meta.line_id || ''
+      meta.line_id || '',
+      caseId,
+      caseKey
     );
   }
 
@@ -1530,6 +1718,11 @@ function processLabel(labelName, opts) {
 
       // 以降は既存の保存処理（添付→Drive、JSON保存、OCR、各種台帳更新）
       const parsed = parseMetaAndFields(msg);
+      parsed.case_key =
+        parsed.case_key || String(metaKV.case_key || metaKV.caseKey || '').trim();
+      parsed.case_id = parsed.case_id || String(metaKV.case_id || metaKV.caseId || '').trim();
+      parsed.form_key =
+        parsed.form_key || String(metaKV.form_key || metaKV.formKey || '').trim();
       if (parsed.form_name) upsertFormLogRegistry_(parsed.form_name);
       if (!parsed.form_name) parsed.form_name = 'unknown_form';
 

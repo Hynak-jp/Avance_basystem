@@ -32,6 +32,9 @@ export default function FormProgressClient({ lineId, displayName, caseId, forms 
   const { formsMap } = useCaseFormsStatus(caseId ?? undefined, lineId);
 
   const doneCount = forms.filter((form) => {
+    const isRepeatableDoc =
+      String(form.formKey || form.storeKey || form.formId).toLowerCase() === 'doc_payslip';
+    if (isRepeatableDoc) return false;
     const key = form.storeKey || form.formKey || form.formId;
     const serverRow = form.formKey ? formsMap.get(form.formKey) : undefined;
     if (serverRow) {
@@ -63,6 +66,8 @@ export default function FormProgressClient({ lineId, displayName, caseId, forms 
   React.useEffect(() => {
     forms.forEach((form) => {
       const key = form.storeKey || form.formKey || form.formId;
+      const isRepeatableDoc = String(key).toLowerCase() === 'doc_payslip';
+      if (isRepeatableDoc) return;
       if (form.completed && store.statusByForm[key] !== 'done') {
         store.setStatus(key, 'done');
       }
@@ -72,6 +77,8 @@ export default function FormProgressClient({ lineId, displayName, caseId, forms 
   React.useEffect(() => {
     forms.forEach((form) => {
       const key = form.storeKey || form.formKey || form.formId;
+      const isRepeatableDoc = String(key).toLowerCase() === 'doc_payslip';
+      if (isRepeatableDoc) return;
       const serverRow = form.formKey ? formsMap.get(form.formKey) : undefined;
       if (!serverRow) return;
       if (!serverRow.canEdit && (serverRow.status === 'submitted' || serverRow.status === 'closed')) {
