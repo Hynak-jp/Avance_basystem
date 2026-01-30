@@ -158,7 +158,18 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opt
   Object.entries(allowedPrefill).forEach(([key, value]) => {
     url.searchParams.set(key, value);
   });
-  if (allowedPrefill.email) {
+  const rawEmail = (() => {
+    if (opts.extraPrefill && Object.prototype.hasOwnProperty.call(opts.extraPrefill, 'email')) {
+      return opts.extraPrefill.email;
+    }
+    if (opts.prefill && typeof opts.prefill === 'object' && 'email' in opts.prefill) {
+      return (opts.prefill as Record<string, PrefillValue>).email;
+    }
+    return undefined;
+  })();
+  if (rawEmail !== null && rawEmail !== undefined && String(rawEmail).trim()) {
+    url.searchParams.set('メールアドレス[0]', String(rawEmail).trim());
+  } else if (allowedPrefill.email) {
     url.searchParams.set('メールアドレス[0]', String(allowedPrefill.email));
   }
   if (redirectKey) url.searchParams.set(redirectKey, redirect.toString());

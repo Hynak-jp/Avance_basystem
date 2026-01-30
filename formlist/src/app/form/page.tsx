@@ -229,7 +229,7 @@ export default async function FormPage() {
     const allowPrefill = f.formKey === 's2002_userform';
     const caseKeyQueryKeys = f.formKey === 'doc_payslip' ? ['case_key[0]'] : undefined;
     const extraPrefill =
-      f.formKey === 's2002_userform' && userEmail
+      !isIntakeForm && userEmail
         ? {
             email: userEmail,
           }
