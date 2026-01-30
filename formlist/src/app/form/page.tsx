@@ -119,13 +119,7 @@ export default async function FormPage() {
 
   if (!lineId) redirect('/login');
 
-  const formsVisible = forms.filter((form) => {
-    if (!form.hidden) return true;
-    if (form.formKey === 'doc_payslip') {
-      return lineId === 'Uc13df94016ee50eb9dd5552bffbe6624';
-    }
-    return false;
-  });
+  const formsVisible = forms.filter((form) => !form.hidden);
 
   // ステータス問い合わせ（caseId が無ければ intake フォームのみ表示）
   const h = await headers();
@@ -180,7 +174,8 @@ export default async function FormPage() {
         throw new Error('empty status');
       }),
     ]);
-  } catch (_) {
+  } catch (err) {
+    void err;
     const primary = await primaryStatusPromise;
     if (primary) {
       status = primary;
