@@ -30,6 +30,7 @@ const normalizeCaseId = (raw: string) => {
 };
 const normalizeUserKey = (lineId: string) => {
   if (!lineId) return '';
+  if (/^staff\d{2}$/i.test(lineId)) return lineId.toLowerCase();
   const cleaned = lineId.toLowerCase().replace(/[^a-z0-9]/g, '');
   return cleaned.slice(0, 6);
 };
@@ -157,6 +158,9 @@ export function makeFormUrl(baseUrl: string, lineId: string, caseId: string, opt
   Object.entries(allowedPrefill).forEach(([key, value]) => {
     url.searchParams.set(key, value);
   });
+  if (allowedPrefill.email) {
+    url.searchParams.set('メールアドレス[0]', String(allowedPrefill.email));
+  }
   if (redirectKey) url.searchParams.set(redirectKey, redirect.toString());
   if (referrerKey) url.searchParams.set(referrerKey, origin ?? '');
   return url.toString();
