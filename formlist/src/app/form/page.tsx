@@ -102,7 +102,6 @@ async function loadForms(): Promise<{ forms: FormDef[] }> {
       baseUrl: 'https://business.form-mailer.jp/fms/829affd7325669',
       formKey: 'doc_payslip',
       storeKey: 'doc_payslip',
-      hidden: true, // 当面は一覧に出さない（6フォーム運用）
     },
   ];
   return { forms };
