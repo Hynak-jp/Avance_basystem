@@ -264,27 +264,17 @@ export default function FormCard({
       {reopenedHint && isClickable && (
         <div className="mt-2 text-xs text-gray-600">{reopenedHint}</div>
       )}
-      {isDraftSupportedForm && (
+      {isDraftSupportedForm && draftStatus === 'READY' && draftViewUrl && (
         <div className="mt-3">
-          {caseGuardActive || draftMessage === 'case_not_ready' ? (
-            <div className="text-sm text-gray-600">受付完了後にドラフトを生成します</div>
-          ) : draftMessage === 'not_submitted' ? (
-            <div className="text-sm text-gray-600">フォーム送信後にドラフトを生成します</div>
-          ) : draftStatus === 'READY' && draftViewUrl ? (
-            <Link
-              href={draftViewUrl}
-              prefetch={false}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-block px-3 py-2 rounded bg-blue-700 text-white"
-            >
-              ドラフト閲覧（PDF）
-            </Link>
-          ) : draftStatus === 'ERROR' ? (
-            <div className="text-sm text-red-700">生成失敗{draftMessage ? `: ${draftMessage}` : ''}</div>
-          ) : (
-            <div className="text-sm text-gray-600">生成中...</div>
-          )}
+          <Link
+            href={draftViewUrl}
+            prefetch={false}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-block px-3 py-2 rounded bg-blue-700 text-white"
+          >
+            ドラフト閲覧（PDF）
+          </Link>
         </div>
       )}
     </div>
