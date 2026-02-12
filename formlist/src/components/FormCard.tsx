@@ -157,7 +157,7 @@ export default function FormCard({
   const isDisabled = !isClickable && !isDone;
 
   const containerClass = `rounded-lg border p-4 ${
-    isClickable ? '' : 'bg-gray-50 text-gray-500 opacity-60 pointer-events-none'
+    isClickable ? '' : 'bg-gray-50 text-gray-500 opacity-60'
   }`;
   let label: string;
   if (isDone) {
@@ -278,15 +278,16 @@ export default function FormCard({
       )}
       {isDraftSupportedForm && draftStatus === 'READY' && draftViewUrl && (
         <div className="mt-3">
-          <Link
-            href={draftViewUrl}
-            prefetch={false}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-block px-3 py-2 rounded bg-blue-700 text-white"
+          <button
+            type="button"
+            onClick={() => {
+              if (typeof window === 'undefined' || !draftViewUrl) return;
+              window.open(draftViewUrl, '_blank', 'noopener,noreferrer');
+            }}
+            className="inline-block px-3 py-2 rounded bg-blue-700 text-white cursor-pointer hover:bg-blue-800"
           >
             ドラフト閲覧（PDF）
-          </Link>
+          </button>
         </div>
       )}
       {isDraftSupportedForm && draftStatus !== 'READY' && draftHint && (
