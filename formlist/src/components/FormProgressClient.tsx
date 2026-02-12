@@ -121,7 +121,7 @@ export default function FormProgressClient({ lineId, displayName, caseId, forms 
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let tries = 0;
-    const maxPolls = 4;
+    const maxPolls = 40;
     const targetKeys = Array.from(
       new Set(forms.filter((f) => isDraftSupportedForm(f)).map((f) => normalizeKey(f)))
     );
@@ -173,6 +173,10 @@ export default function FormProgressClient({ lineId, displayName, caseId, forms 
           });
           return next;
         });
+        if (tries < maxPolls) {
+          tries += 1;
+          timer = setTimeout(fetchDraftAll, 15000);
+        }
       }
     };
 

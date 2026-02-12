@@ -712,10 +712,22 @@ function statusApi_extractDriveFileIdFromUrl_(url) {
   return (m && m[1]) ? m[1] : '';
 }
 
-function statusApi_latestSubmissionForDraft_(caseId, formKey) {
+function statusApi_latestSubmissionForDraft_(lineId, caseId, formKey) {
   try {
     var cfg = statusApi_draftConfig_(formKey);
     if (!cfg) return null;
+    var lid = String(lineId || '').trim();
+    var expectedUserKey = '';
+    try {
+      var row = typeof drive_lookupCaseRow_ === 'function' ? drive_lookupCaseRow_({ caseId: caseId, lineId: lid }) : null;
+      if (row && row.userKey) expectedUserKey = String(row.userKey || '').trim().toLowerCase();
+    } catch (_) {}
+    try {
+      if (!expectedUserKey && lid && typeof drive_userKeyFromLineId_ === 'function') {
+        expectedUserKey = String(drive_userKeyFromLineId_(lid) || '').trim().toLowerCase();
+      }
+    } catch (_) {}
+    var expectedCaseKey = expectedUserKey ? (expectedUserKey + '-' + statusApi_normCaseId_(caseId)) : '';
     var aliasSet = Object.create(null);
     (cfg.aliases || []).forEach(function (k) {
       aliasSet[statusApi_normDraftKey_(k)] = true;
@@ -731,10 +743,23 @@ function statusApi_latestSubmissionForDraft_(caseId, formKey) {
     var si = idx['submission_id'] != null ? idx['submission_id'] : idx['submissionId'];
     var seqIdx = idx['seq'] != null ? idx['seq'] : idx['Seq'];
     var du = idx['last_draft_url'] != null ? idx['last_draft_url'] : idx['lastDraftUrl'];
+    var li = idx['line_id'] != null ? idx['line_id'] : idx['lineId'];
+    var ui = idx['user_key'] != null ? idx['user_key'] : idx['userKey'];
+    var cki = idx['case_key'] != null ? idx['case_key'] : idx['caseKey'];
     if (!(ci >= 0 && fi >= 0)) return null;
     var wantCase = statusApi_normCaseId_(caseId);
     var rows = sh.getRange(2, 1, sh.getLastRow() - 1, headers.length).getValues();
+    var candidates = [];
     var foundAny = false;
+    function rowMatchScope_(row) {
+      var rowCaseKey = cki >= 0 ? String(row[cki] || '').trim().toLowerCase() : '';
+      var rowLineId = li >= 0 ? String(row[li] || '').trim() : '';
+      var rowUserKey = ui >= 0 ? String(row[ui] || '').trim().toLowerCase() : '';
+      if (expectedCaseKey && rowCaseKey) return rowCaseKey === expectedCaseKey;
+      if (lid && rowLineId) return rowLineId === lid;
+      if (expectedUserKey && rowUserKey) return rowUserKey === expectedUserKey;
+      return false;
+    }
     var bestSid = '';
     var bestSeq = -1;
     var bestDraftUrl = '';
@@ -745,17 +770,30 @@ function statusApi_latestSubmissionForDraft_(caseId, formKey) {
       var fk = statusApi_normDraftKey_(String(row[fi] || '').trim());
       if (!aliasSet[fk]) continue;
       foundAny = true;
-      var sid = si >= 0 ? String(row[si] || '').trim() : '';
-      var seq = seqIdx >= 0 ? Number(row[seqIdx] || 0) || 0 : 0;
+      if (rowMatchScope_(row)) {
+        candidates.push(row);
+      }
+    }
+    var scanRows = candidates.length ? candidates : rows.filter(function (row) {
+      if (statusApi_normCaseId_(row[ci]) !== wantCase) return false;
+      var fk = statusApi_normDraftKey_(String(row[fi] || '').trim());
+      return !!aliasSet[fk];
+    });
+    for (var j = 0; j < scanRows.length; j++) {
+      var row2 = scanRows[j];
+      var fk2 = statusApi_normDraftKey_(String(row2[fi] || '').trim());
+      var sid = si >= 0 ? String(row2[si] || '').trim() : '';
+      if (!/^\d+$/.test(sid)) continue;
+      var seq = seqIdx >= 0 ? Number(row2[seqIdx] || 0) || 0 : 0;
       if (seq > bestSeq && sid) {
         bestSeq = seq;
         bestSid = sid;
-        bestDraftUrl = du >= 0 ? String(row[du] || '').trim() : '';
-        bestFormKey = fk;
+        bestDraftUrl = du >= 0 ? String(row2[du] || '').trim() : '';
+        bestFormKey = fk2;
       } else if (!bestSid && sid) {
         bestSid = sid;
-        bestDraftUrl = du >= 0 ? String(row[du] || '').trim() : '';
-        bestFormKey = fk;
+        bestDraftUrl = du >= 0 ? String(row2[du] || '').trim() : '';
+        bestFormKey = fk2;
       }
     }
     if (!foundAny) return null;
@@ -813,15 +851,19 @@ function statusApi_readDraftStatus_(lineId, caseId, formKey) {
   if (!folderId) return { status: 'GENERATING', message: 'case_folder_missing' };
   var caseFolder = DriveApp.getFolderById(folderId);
   var draftPdfFolders = caseFolder.getFoldersByName('drafts_pdf');
-  var submission = statusApi_latestSubmissionForDraft_(cid, cfg.key);
+  var draftsPdf = draftPdfFolders.hasNext() ? draftPdfFolders.next() : caseFolder.createFolder('drafts_pdf');
+  var latestPdfAny = statusApi_findLatestByPrefix_(draftsPdf, cfg.filePrefix + cid + '_draft_', '.pdf');
+  var latestErrAny = statusApi_findLatestByPrefix_(draftsPdf, cfg.filePrefix + cid + '_draft_', '.error.json');
+  var submission = statusApi_latestSubmissionForDraft_(lid, cid, cfg.key);
   if (!submission || !submission.found) {
+    if (latestPdfAny) return { status: 'READY', pdfFileId: latestPdfAny.fileId, updatedAt: latestPdfAny.updatedAt };
+    if (latestErrAny) return { status: 'ERROR', updatedAt: latestErrAny.updatedAt, message: 'pdf_generation_failed' };
     return { status: 'GENERATING', message: 'not_submitted' };
   }
   var latestSubmissionId = String(submission.submissionId || '').trim();
   var baseName = latestSubmissionId ? (cfg.filePrefix + cid + '_draft_' + latestSubmissionId) : (cfg.filePrefix + cid + '_draft_');
   var wantPdfName = latestSubmissionId ? (baseName + '.pdf') : '';
   var wantErrName = latestSubmissionId ? (baseName + '.error.json') : '';
-  var draftsPdf = draftPdfFolders.hasNext() ? draftPdfFolders.next() : caseFolder.createFolder('drafts_pdf');
   var latestPdf = wantPdfName ? statusApi_findLatestByPrefix_(draftsPdf, wantPdfName, '.pdf') : statusApi_findLatestByPrefix_(draftsPdf, cfg.filePrefix + cid + '_draft_', '.pdf');
   var latestErr = wantErrName ? statusApi_findLatestByPrefix_(draftsPdf, wantErrName, '.error.json') : statusApi_findLatestByPrefix_(draftsPdf, cfg.filePrefix + cid + '_draft_', '.error.json');
   if (wantPdfName && latestPdf && latestPdf.name === wantPdfName) {
@@ -842,6 +884,7 @@ function statusApi_readDraftStatus_(lineId, caseId, formKey) {
     }
   }
   if (!sourceId) {
+    if (latestPdfAny) return { status: 'READY', pdfFileId: latestPdfAny.fileId, updatedAt: latestPdfAny.updatedAt };
     return { status: 'GENERATING', message: 'draft_source_missing' };
   }
   try {

@@ -197,6 +197,17 @@ export default function FormCard({
       ? `事務所により再入力が許可されています（期限：${serverStatus.reopen_until}）`
       : '事務所により再入力が許可されています'
     : '';
+  const draftHint = (() => {
+    const msg = String(draftMessage || '').trim();
+    if (!msg) return '';
+    if (msg === 'case_not_ready') return 'ケース情報を確認中です。';
+    if (msg === 'not_submitted') return '提出データを確認中です。';
+    if (msg === 'draft_source_missing') return 'ドラフト元データを準備中です。';
+    if (msg === 'pdf_generation_failed') return 'PDF生成に失敗しました。時間をおいて再度ご確認ください。';
+    if (msg === 'status_fetch_failed') return 'ドラフト状態の取得に失敗しました。再読み込みしてください。';
+    if (msg.startsWith('http_')) return 'ドラフト状態の取得中です。';
+    return msg;
+  })();
 
   const handleClick = () => {
     if (typeof window === 'undefined') return;
@@ -275,6 +286,11 @@ export default function FormCard({
           >
             ドラフト閲覧（PDF）
           </Link>
+        </div>
+      )}
+      {isDraftSupportedForm && draftStatus !== 'READY' && draftHint && (
+        <div className={`mt-2 text-xs ${draftStatus === 'ERROR' ? 'text-red-700' : 'text-gray-600'}`}>
+          {draftHint}
         </div>
       )}
     </div>

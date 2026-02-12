@@ -76,16 +76,24 @@ export async function GET(req: NextRequest) {
 
     const draftRes = await callGasGet('draft_status', lineId, caseId, { formKey });
     const draft = draftRes.json;
-    const status = draftRes.status >= 400
-      ? String((draft.status as string) || 'GENERATING')
-      : String((draft.status as string) || 'GENERATING');
+    const rawStatus = String((draft.status as string) || '').trim().toUpperCase();
+    const status =
+      rawStatus === 'READY' || rawStatus === 'ERROR' || rawStatus === 'GENERATING'
+        ? rawStatus
+        : String((draft.error as string) || '').trim() === 'draft_error'
+        ? 'ERROR'
+        : 'GENERATING';
+    const message =
+      String((draft.message as string) || '').trim() ||
+      String((draft.error as string) || '').trim() ||
+      (draftRes.status >= 400 ? `http_${draftRes.status}` : undefined);
     const payload: Record<string, unknown> = {
       ok: true,
       formKey,
       caseId,
       status,
       updatedAt: (draft.updatedAt as string) || undefined,
-      message: (draft.message as string) || undefined,
+      message: message || undefined,
     };
 
     if (status === 'READY') {
