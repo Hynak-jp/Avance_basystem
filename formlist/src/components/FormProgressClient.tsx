@@ -39,13 +39,21 @@ const normalizeKey = (f: { formKey?: string; storeKey?: string; formId: string }
     .trim()
     .toLowerCase();
 
-const isS2002 = (f: { formKey?: string; storeKey?: string; formId: string }) =>
-  normalizeKey(f) === 's2002_userform';
+const DRAFT_SUPPORTED_FORM_KEYS = new Set([
+  's2002_userform',
+  's2010_p1_career',
+  's2010_p2_cause',
+  's2011_income_m1',
+  's2011_income_m2',
+]);
+
+const isDraftSupportedForm = (f: { formKey?: string; storeKey?: string; formId: string }) =>
+  DRAFT_SUPPORTED_FORM_KEYS.has(normalizeKey(f));
 
 export default function FormProgressClient({ lineId, displayName, caseId, forms }: Props) {
   const store = makeProgressStore(lineId)();
   const { formsMap } = useCaseFormsStatus(caseId ?? undefined, lineId);
-  const [draftState, setDraftState] = React.useState<DraftStatusResponse>({ status: 'GENERATING' });
+  const [draftStateMap, setDraftStateMap] = React.useState<Record<string, DraftStatusResponse>>({});
 
   const doneCount = forms.filter((form) => {
     const isRepeatableDoc =
@@ -114,37 +122,61 @@ export default function FormProgressClient({ lineId, displayName, caseId, forms 
     let timer: ReturnType<typeof setTimeout> | null = null;
     let tries = 0;
     const maxPolls = 4;
-    const hasS2002 = forms.some((f) => isS2002(f));
-    if (!hasS2002 || !caseId) {
-      setDraftState({ status: 'GENERATING', message: !caseId ? 'case_not_ready' : undefined });
+    const targetKeys = Array.from(
+      new Set(forms.filter((f) => isDraftSupportedForm(f)).map((f) => normalizeKey(f)))
+    );
+    if (!targetKeys.length) {
+      return () => {};
+    }
+    if (!caseId) {
+      setDraftStateMap((prev) => {
+        const next = { ...prev };
+        targetKeys.forEach((k) => {
+          next[k] = { status: 'GENERATING', message: 'case_not_ready' };
+        });
+        return next;
+      });
       return () => {};
     }
 
-    const fetchDraft = async () => {
+    const fetchDraftAll = async () => {
       try {
-        const params = new URLSearchParams({ formKey: 's2002_userform', caseId: String(caseId) });
-        const res = await fetch(`/api/draft/status?${params.toString()}`, { cache: 'no-store' });
-        const json = (await res.json()) as DraftStatusResponse;
+        const rows = await Promise.all(
+          targetKeys.map(async (formKey) => {
+            const params = new URLSearchParams({ formKey, caseId: String(caseId) });
+            const res = await fetch(`/api/draft/status?${params.toString()}`, { cache: 'no-store' });
+            const json = (await res.json()) as DraftStatusResponse;
+            if (!res.ok) {
+              return [formKey, { status: 'GENERATING', message: json.message || `http_${res.status}` } as DraftStatusResponse] as const;
+            }
+            return [formKey, { status: json.status || 'GENERATING', viewUrl: json.viewUrl, message: json.message } as DraftStatusResponse] as const;
+          })
+        );
         if (cancelled) return;
-        if (!res.ok) {
-          const message = json.message || `http_${res.status}`;
-          setDraftState({ status: 'GENERATING', message });
-          return;
-        }
-        const status = json.status || 'GENERATING';
-        setDraftState({ status, viewUrl: json.viewUrl, message: json.message });
-        if (status === 'GENERATING' && tries < maxPolls) {
+        const nextMap: Record<string, DraftStatusResponse> = {};
+        rows.forEach(([k, v]) => {
+          nextMap[k] = v;
+        });
+        setDraftStateMap((prev) => ({ ...prev, ...nextMap }));
+        const hasGenerating = rows.some(([, v]) => (v.status || 'GENERATING') === 'GENERATING');
+        if (hasGenerating && tries < maxPolls) {
           tries += 1;
-          timer = setTimeout(fetchDraft, 15000);
+          timer = setTimeout(fetchDraftAll, 15000);
         }
       } catch (e) {
         if (cancelled) return;
         console.error('[form] draft status fetch failed', e);
-        setDraftState({ status: 'GENERATING', message: 'status_fetch_failed' });
+        setDraftStateMap((prev) => {
+          const next = { ...prev };
+          targetKeys.forEach((k) => {
+            next[k] = { status: 'GENERATING', message: 'status_fetch_failed' };
+          });
+          return next;
+        });
       }
     };
 
-    void fetchDraft();
+    void fetchDraftAll();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
@@ -156,7 +188,9 @@ export default function FormProgressClient({ lineId, displayName, caseId, forms 
       <ProgressBar total={forms.length} done={doneCount} />
       <div className="grid gap-6 md:grid-cols-2">
         {forms.map((form) => {
-          const s2002 = isS2002(form);
+          const normalized = normalizeKey(form);
+          const draftState = draftStateMap[normalized];
+          const draftEnabled = isDraftSupportedForm(form);
           return (
             <FormCard
               key={form.storeKey || form.formId}
@@ -173,9 +207,9 @@ export default function FormProgressClient({ lineId, displayName, caseId, forms 
               formKey={form.formKey}
               storeKey={form.storeKey || form.formKey || form.formId}
               serverStatus={form.formKey ? formsMap.get(form.formKey) : undefined}
-              draftStatus={s2002 ? draftState.status ?? null : null}
-              draftViewUrl={s2002 ? draftState.viewUrl : undefined}
-              draftMessage={s2002 ? draftState.message : undefined}
+              draftStatus={draftEnabled ? draftState?.status ?? null : null}
+              draftViewUrl={draftEnabled ? draftState?.viewUrl : undefined}
+              draftMessage={draftEnabled ? draftState?.message : undefined}
             />
           );
         })}

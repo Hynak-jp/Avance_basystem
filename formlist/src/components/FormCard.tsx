@@ -68,7 +68,14 @@ export default function FormCard({
       .map((v) => v.toLowerCase())
       .some((v) => v.includes('intake')) ||
     title.includes('初回受付');
-  const isS2002Form = String(formKey || progressKey).toLowerCase() === 's2002_userform';
+  const draftKey = String(formKey || storeKey || progressKey).trim().toLowerCase();
+  const isDraftSupportedForm = new Set([
+    's2002_userform',
+    's2010_p1_career',
+    's2010_p2_cause',
+    's2011_income_m1',
+    's2011_income_m2',
+  ]).has(draftKey);
   // intake は常に有効扱いにするため、外部からの disabled を無視して判定する
   const internalDisabled = isIntakeForm ? false : !!disabled;
   const fallback = internalDisabled
@@ -257,10 +264,12 @@ export default function FormCard({
       {reopenedHint && isClickable && (
         <div className="mt-2 text-xs text-gray-600">{reopenedHint}</div>
       )}
-      {isS2002Form && (
+      {isDraftSupportedForm && (
         <div className="mt-3">
           {caseGuardActive || draftMessage === 'case_not_ready' ? (
             <div className="text-sm text-gray-600">受付完了後にドラフトを生成します</div>
+          ) : draftMessage === 'not_submitted' ? (
+            <div className="text-sm text-gray-600">フォーム送信後にドラフトを生成します</div>
           ) : draftStatus === 'READY' && draftViewUrl ? (
             <Link
               href={draftViewUrl}

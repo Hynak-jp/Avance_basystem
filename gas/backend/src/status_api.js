@@ -663,94 +663,217 @@ function statusApi_resolveCaseFolderId_(lineId, caseId) {
   return '';
 }
 
-function statusApi_latestSubmissionId_(caseId, formKey) {
+function statusApi_normDraftKey_(formKey) {
+  var key = String(formKey || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (key === 's2002' || key === 's2002_form') return 's2002_userform';
+  if (key === 's2010_p1_intake') return 's2010_p1_career';
+  if (key === 's2010_userform') return 's2010_p1_career';
+  return key;
+}
+
+function statusApi_draftConfig_(formKey) {
+  var key = statusApi_normDraftKey_(formKey);
+  var map = {
+    s2002_userform: {
+      key: 's2002_userform',
+      aliases: ['s2002_userform', 's2002', 's2002_form'],
+      filePrefix: 'S2002_',
+    },
+    s2010_p1_career: {
+      key: 's2010_p1_career',
+      aliases: ['s2010_p1_career', 's2010_p1_intake', 's2010_userform'],
+      filePrefix: 'S2010_',
+    },
+    s2010_p2_cause: {
+      key: 's2010_p2_cause',
+      aliases: ['s2010_p2_cause', 's2010_userform'],
+      filePrefix: 'S2010_',
+    },
+    s2011_income_m1: {
+      key: 's2011_income_m1',
+      aliases: ['s2011_income_m1'],
+      filePrefix: 'S2011_',
+    },
+    s2011_income_m2: {
+      key: 's2011_income_m2',
+      aliases: ['s2011_income_m2'],
+      filePrefix: 'S2011_',
+    },
+  };
+  return map[key] || null;
+}
+
+function statusApi_extractDriveFileIdFromUrl_(url) {
+  var s = String(url || '').trim();
+  if (!s) return '';
+  var m = s.match(/\/d\/([a-zA-Z0-9_-]{20,})/);
+  if (m && m[1]) return m[1];
+  m = s.match(/[?&]id=([a-zA-Z0-9_-]{20,})/);
+  return (m && m[1]) ? m[1] : '';
+}
+
+function statusApi_latestSubmissionForDraft_(caseId, formKey) {
   try {
+    var cfg = statusApi_draftConfig_(formKey);
+    if (!cfg) return null;
+    var aliasSet = Object.create(null);
+    (cfg.aliases || []).forEach(function (k) {
+      aliasSet[statusApi_normDraftKey_(k)] = true;
+    });
     var sh = typeof bs_getSheet_ === 'function' ? bs_getSheet_(
       (typeof SHEETS_REPO_SUBMISSIONS !== 'undefined' && SHEETS_REPO_SUBMISSIONS) ? SHEETS_REPO_SUBMISSIONS : 'submissions'
     ) : null;
-    if (!sh || sh.getLastRow() < 2) return '';
+    if (!sh || sh.getLastRow() < 2) return null;
     var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(function (v) { return String(v || '').trim(); });
     var idx = typeof bs_toIndexMap_ === 'function' ? bs_toIndexMap_(headers) : {};
     var ci = idx['case_id'] != null ? idx['case_id'] : idx['caseId'];
     var fi = idx['form_key'] != null ? idx['form_key'] : idx['formKey'];
     var si = idx['submission_id'] != null ? idx['submission_id'] : idx['submissionId'];
     var seqIdx = idx['seq'] != null ? idx['seq'] : idx['Seq'];
-    if (!(ci >= 0 && fi >= 0) || !(si >= 0 || seqIdx >= 0)) return '';
+    var du = idx['last_draft_url'] != null ? idx['last_draft_url'] : idx['lastDraftUrl'];
+    if (!(ci >= 0 && fi >= 0)) return null;
     var wantCase = statusApi_normCaseId_(caseId);
-    var wantForm = String(formKey || '').trim().toLowerCase();
     var rows = sh.getRange(2, 1, sh.getLastRow() - 1, headers.length).getValues();
+    var foundAny = false;
     var bestSid = '';
     var bestSeq = -1;
+    var bestDraftUrl = '';
+    var bestFormKey = '';
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i];
       if (statusApi_normCaseId_(row[ci]) !== wantCase) continue;
-      var fk = String(row[fi] || '').trim().toLowerCase();
-      if (fk !== wantForm) continue;
+      var fk = statusApi_normDraftKey_(String(row[fi] || '').trim());
+      if (!aliasSet[fk]) continue;
+      foundAny = true;
       var sid = si >= 0 ? String(row[si] || '').trim() : '';
       var seq = seqIdx >= 0 ? Number(row[seqIdx] || 0) || 0 : 0;
       if (seq > bestSeq && sid) {
         bestSeq = seq;
         bestSid = sid;
+        bestDraftUrl = du >= 0 ? String(row[du] || '').trim() : '';
+        bestFormKey = fk;
       } else if (!bestSid && sid) {
         bestSid = sid;
+        bestDraftUrl = du >= 0 ? String(row[du] || '').trim() : '';
+        bestFormKey = fk;
       }
     }
-    return String(bestSid || '').trim();
+    if (!foundAny) return null;
+    return {
+      found: true,
+      submissionId: String(bestSid || '').trim(),
+      lastDraftUrl: String(bestDraftUrl || '').trim(),
+      formKey: String(bestFormKey || ''),
+    };
   } catch (_) {
-    return '';
+    return null;
   }
 }
 
-function statusApi_readS2002DraftStatus_(lineId, caseId, formKey) {
+function statusApi_findLatestByPrefix_(folder, prefix, suffix) {
+  var it = folder.getFiles();
+  var latest = null;
+  while (it.hasNext()) {
+    var f = it.next();
+    var name = String(f.getName() || '');
+    if (prefix && name.indexOf(prefix) !== 0) continue;
+    if (suffix && name.lastIndexOf(suffix) !== name.length - suffix.length) continue;
+    var updated = statusApi_toIso_(f.getLastUpdated());
+    if (!latest || String(updated) > String(latest.updatedAt || '')) {
+      latest = { fileId: f.getId(), updatedAt: updated, name: name };
+    }
+  }
+  return latest;
+}
+
+function statusApi_exportAsPdfBlob_(fileId) {
+  var f = DriveApp.getFileById(String(fileId || ''));
+  var mime = String(f.getMimeType() || '');
+  if (mime === 'application/pdf') return f.getBlob();
+  var exportable = mime === 'application/vnd.google-apps.document' || mime === 'application/vnd.google-apps.spreadsheet' || mime === 'application/vnd.google-apps.presentation';
+  if (!exportable) throw new Error('unsupported_mime:' + mime);
+  var exportUrl = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(String(fileId)) + '/export?mimeType=application/pdf';
+  var res = UrlFetchApp.fetch(exportUrl, {
+    method: 'get',
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    muteHttpExceptions: true,
+  });
+  var code = Number(res.getResponseCode() || 0);
+  if (code < 200 || code >= 300) throw new Error('pdf_export_http_' + code);
+  return res.getBlob();
+}
+
+function statusApi_readDraftStatus_(lineId, caseId, formKey) {
   var lid = String(lineId || '').trim();
   var cid = statusApi_normCaseId_(caseId);
-  var fk = String(formKey || '').trim().toLowerCase();
+  var cfg = statusApi_draftConfig_(formKey);
   if (!lid || !cid) return { status: 'GENERATING', message: 'case_not_ready' };
-  if (fk && fk !== 's2002_userform') return { status: 'GENERATING', message: 'unsupported_form' };
+  if (!cfg) return { status: 'GENERATING', message: 'unsupported_form' };
   var folderId = statusApi_resolveCaseFolderId_(lid, cid);
   if (!folderId) return { status: 'GENERATING', message: 'case_folder_missing' };
   var caseFolder = DriveApp.getFolderById(folderId);
   var draftPdfFolders = caseFolder.getFoldersByName('drafts_pdf');
-  if (!draftPdfFolders.hasNext()) return { status: 'GENERATING', message: 'draft_pdf_pending' };
-  var draftsPdf = draftPdfFolders.next();
-  var latestSubmissionId = statusApi_latestSubmissionId_(cid, 's2002_userform');
-  var baseName = latestSubmissionId ? ('S2002_' + cid + '_draft_' + latestSubmissionId) : ('S2002_' + cid + '_draft_');
+  var submission = statusApi_latestSubmissionForDraft_(cid, cfg.key);
+  if (!submission || !submission.found) {
+    return { status: 'GENERATING', message: 'not_submitted' };
+  }
+  var latestSubmissionId = String(submission.submissionId || '').trim();
+  var baseName = latestSubmissionId ? (cfg.filePrefix + cid + '_draft_' + latestSubmissionId) : (cfg.filePrefix + cid + '_draft_');
   var wantPdfName = latestSubmissionId ? (baseName + '.pdf') : '';
   var wantErrName = latestSubmissionId ? (baseName + '.error.json') : '';
-  var latestPdf = null;
-  var latestErr = null;
-  var it = draftsPdf.getFiles();
-  while (it.hasNext()) {
-    var f = it.next();
-    var name = String(f.getName() || '');
-    var updated = statusApi_toIso_(f.getLastUpdated());
-    if (wantPdfName && name === wantPdfName) {
-      return { status: 'READY', pdfFileId: f.getId(), updatedAt: updated };
-    }
-    if (wantErrName && name === wantErrName) {
-      latestErr = { fileId: f.getId(), updatedAt: updated };
-    }
-    if (!latestSubmissionId && /^S2002_\d{4}_draft_.*\.pdf$/i.test(name) && name.indexOf('S2002_' + cid + '_draft_') === 0) {
-      if (!latestPdf || String(updated) > String(latestPdf.updatedAt || '')) {
-        latestPdf = { fileId: f.getId(), updatedAt: updated };
-      }
-    }
-    if (!latestSubmissionId && /^S2002_\d{4}_draft_.*\.error\.json$/i.test(name) && name.indexOf('S2002_' + cid + '_draft_') === 0) {
-      if (!latestErr || String(updated) > String(latestErr.updatedAt || '')) {
-        latestErr = { fileId: f.getId(), updatedAt: updated };
-      }
-    }
+  var draftsPdf = draftPdfFolders.hasNext() ? draftPdfFolders.next() : caseFolder.createFolder('drafts_pdf');
+  var latestPdf = wantPdfName ? statusApi_findLatestByPrefix_(draftsPdf, wantPdfName, '.pdf') : statusApi_findLatestByPrefix_(draftsPdf, cfg.filePrefix + cid + '_draft_', '.pdf');
+  var latestErr = wantErrName ? statusApi_findLatestByPrefix_(draftsPdf, wantErrName, '.error.json') : statusApi_findLatestByPrefix_(draftsPdf, cfg.filePrefix + cid + '_draft_', '.error.json');
+  if (wantPdfName && latestPdf && latestPdf.name === wantPdfName) {
+    return { status: 'READY', pdfFileId: latestPdf.fileId, updatedAt: latestPdf.updatedAt };
   }
   if (latestSubmissionId && latestErr) {
     return { status: 'ERROR', updatedAt: latestErr.updatedAt, message: 'pdf_generation_failed' };
   }
-  if (!latestSubmissionId && latestPdf) {
+  if (latestPdf && !wantPdfName) {
     return { status: 'READY', pdfFileId: latestPdf.fileId, updatedAt: latestPdf.updatedAt };
   }
-  if (!latestSubmissionId && latestErr) {
-    return { status: 'ERROR', updatedAt: latestErr.updatedAt, message: 'pdf_generation_failed' };
+  var sourceId = statusApi_extractDriveFileIdFromUrl_(submission.lastDraftUrl || '');
+  if (!sourceId && cfg.filePrefix === 'S2010_') {
+    var draftsFolderIt = caseFolder.getFoldersByName('drafts');
+    if (draftsFolderIt.hasNext()) {
+      var draftFile = statusApi_findLatestByPrefix_(draftsFolderIt.next(), cfg.filePrefix + cid + '_draft_', '');
+      sourceId = draftFile ? String(draftFile.fileId || '') : '';
+    }
   }
-  return { status: 'GENERATING', message: 'pdf_not_found_yet' };
+  if (!sourceId) {
+    return { status: 'GENERATING', message: 'draft_source_missing' };
+  }
+  try {
+    // 未生成ならここで1回だけPDFを作る（同名は置換）
+    var oldPdf = draftsPdf.getFilesByName(baseName + '.pdf');
+    while (oldPdf.hasNext()) {
+      try { oldPdf.next().setTrashed(true); } catch (_) {}
+    }
+    var oldErr = draftsPdf.getFilesByName(baseName + '.error.json');
+    while (oldErr.hasNext()) {
+      try { oldErr.next().setTrashed(true); } catch (_) {}
+    }
+    var pdfBlob = statusApi_exportAsPdfBlob_(sourceId).setName(baseName + '.pdf');
+    var saved = draftsPdf.createFile(pdfBlob);
+    return { status: 'READY', pdfFileId: saved.getId(), updatedAt: statusApi_toIso_(saved.getLastUpdated()) };
+  } catch (err) {
+    try {
+      draftsPdf.createFile(
+        Utilities.newBlob(
+          JSON.stringify({
+            status: 'ERROR',
+            message: String((err && err.message) || err || 'pdf_export_failed'),
+            updatedAt: new Date().toISOString(),
+            sourceId: String(sourceId || ''),
+          }, null, 2),
+          'application/json',
+          baseName + '.error.json'
+        )
+      );
+    } catch (_) {}
+    return { status: 'ERROR', message: 'pdf_generation_failed' };
+  }
 }
 
 var STATUS_API_DRAFT_PDF_MAX_BYTES = 3 * 1024 * 1024; // 3MB safety cap (before base64)
@@ -1535,8 +1658,9 @@ function doGet(e) {
       return statusApi_jsonOut_({ ok: false, error: 'case_not_found' }, 404);
     }
     var draftFormKey = String(p.formKey || p.form_key || 's2002_userform').trim();
-    var draft = statusApi_readS2002DraftStatus_(draftLineId, draftCaseId, draftFormKey);
-    return statusApi_jsonOut_(Object.assign({ ok: true, caseId: draftCaseId, formKey: draftFormKey }, draft), 200);
+    var draftCanonical = (statusApi_draftConfig_(draftFormKey) || {}).key || draftFormKey;
+    var draft = statusApi_readDraftStatus_(draftLineId, draftCaseId, draftFormKey);
+    return statusApi_jsonOut_(Object.assign({ ok: true, caseId: draftCaseId, formKey: draftCanonical }, draft), 200);
   }
 
   if (action === 'draft_pdf') {
@@ -1550,7 +1674,7 @@ function doGet(e) {
     if (!caseIdPdf) caseIdPdf = statusApi_normCaseId_(lookupCaseIdByLineId_(lineIdPdf) || '');
     if (!caseIdPdf) return statusApi_jsonOut_({ ok: false, error: 'case_not_found' }, 404);
     var formKeyPdf = String(p.formKey || p.form_key || 's2002_userform').trim();
-    var draftStatus = statusApi_readS2002DraftStatus_(lineIdPdf, caseIdPdf, formKeyPdf);
+    var draftStatus = statusApi_readDraftStatus_(lineIdPdf, caseIdPdf, formKeyPdf);
     if (String(draftStatus.status || '') !== 'READY' || !draftStatus.pdfFileId) {
       return statusApi_jsonOut_(
         {

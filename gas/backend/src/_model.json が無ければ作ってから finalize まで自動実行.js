@@ -1,7 +1,20 @@
 // _model.json が無ければ作ってから finalize まで自動実行
 function finalize_fromImage_smart(fileId, lineId){
-  fileId = String(fileId).trim();
-  var file   = DriveApp.getFileById(fileId);
+  fileId = normalizeDriveFileId_(fileId);
+  if (!fileId) {
+    throw new Error('fileId が不正です（空文字 / URL抽出失敗）');
+  }
+  var file;
+  try {
+    file = DriveApp.getFileById(fileId);
+  } catch (e) {
+    // 失敗原因を切り分けやすくする（削除済み・権限なし・ID違い）
+    throw new Error(
+      'DriveApp.getFileById 失敗: fileId=' + fileId +
+      ' / ファイルが存在しない・権限がない・IDが誤りの可能性があります。' +
+      '（元エラー: ' + ((e && e.message) || e) + '）'
+    );
+  }
   var parent = file.getParents().hasNext() ? file.getParents().next() : null;
   if (!parent) throw new Error('parent folder not found');
 
@@ -37,6 +50,16 @@ function finalize_fromImage_smart(fileId, lineId){
 
   // ここまで来たら _model.json あり → finalize
   finalize_fromModel_(fileId, lineId || 'LINE_TEST');
+}
+
+function normalizeDriveFileId_(value){
+  var s = String(value || '').trim();
+  if (!s) return '';
+  var m = s.match(/\/d\/([a-zA-Z0-9_-]{20,})/);
+  if (m && m[1]) return m[1];
+  m = s.match(/[?&]id=([a-zA-Z0-9_-]{20,})/);
+  if (m && m[1]) return m[1];
+  return s;
 }
 
 // 実行メニュー用ラッパー（例）
