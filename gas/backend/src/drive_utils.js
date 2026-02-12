@@ -46,6 +46,7 @@ function drive_userKeyFromLineId_(lineId) {
     const userKey = hit && hit.userKey ? String(hit.userKey).trim() : '';
     if (userKey) return userKey.toLowerCase();
   } catch (_) {}
+  if (/^staff\d{2}$/i.test(lid)) return lid.toLowerCase();
   return lid.slice(0, 6).toLowerCase();
 }
 

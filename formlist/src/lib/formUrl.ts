@@ -37,7 +37,7 @@ const normalizeUserKey = (lineId: string) => {
 const makeCaseKey = (lineId: string, caseId: string) => {
   const userKey = normalizeUserKey(lineId);
   const normalizedCaseId = normalizeCaseId(caseId);
-  if (userKey.length !== 6 || !normalizedCaseId) return '';
+  if (!userKey || !normalizedCaseId) return '';
   return `${userKey}-${normalizedCaseId}`;
 };
 const toIdx0 = (name?: string) => (name ? (/\[\d+\]$/.test(name) ? name : `${name}[0]`) : undefined);

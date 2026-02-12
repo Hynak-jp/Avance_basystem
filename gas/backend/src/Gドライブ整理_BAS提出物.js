@@ -476,12 +476,12 @@ function normalizeCaseId4_(s) {
 
 function normalizeCaseKeyStrict_(s) {
   const raw = String(s || '').trim().toLowerCase();
-  if (!/^[a-z0-9]{6}-\d{4}$/.test(raw)) return '';
+  if (!/^(?:[a-z0-9]{6}|staff\d{2})-\d{4}$/.test(raw)) return '';
   return raw;
 }
 function normalizeCaseKeyLoose_(s) {
   const raw = String(s || '').trim().toLowerCase();
-  if (!/^[a-z0-9]{2,6}-\d{4}$/.test(raw)) return '';
+  if (!/^(?:[a-z0-9]{2,6}|staff\d{2})-\d{4}$/.test(raw)) return '';
   return raw;
 }
 
@@ -499,11 +499,12 @@ function getOrCreateFolder(parent, name) {
   return it.hasNext() ? it.next() : parent.createFolder(nm);
 }
 
-/** userKey = lineId 先頭6小文字 */
+/** userKey = lineId 先頭6小文字（staffNN はそのまま） */
 function userKeyFromLineId_(lineId) {
-  return String(lineId || '')
-    .slice(0, 6)
-    .toLowerCase();
+  const lid = String(lineId || '').trim().toLowerCase();
+  if (!lid) return '';
+  if (/^staff\d{2}$/.test(lid)) return lid;
+  return lid.slice(0, 6);
 }
 /** caseKey = userKey-caseId(4桁ゼロ埋め) */
 function caseKey_(lineId, caseId) {
@@ -2030,9 +2031,10 @@ function verifySig_(base, sigHex) {
 }
 
 function makeUserKey_(lineId) {
-  return String(lineId || '')
-    .slice(0, 6)
-    .toLowerCase();
+  const lid = String(lineId || '').trim().toLowerCase();
+  if (!lid) return '';
+  if (/^staff\d{2}$/.test(lid)) return lid;
+  return lid.slice(0, 6);
 }
 
 function ensureUserRootFolder_(displayName, userKey) {

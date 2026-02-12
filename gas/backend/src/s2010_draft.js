@@ -997,6 +997,12 @@ function s2010_sha1Hex_(input) {
 }
 
 function s2010_resolveExistingCaseFolderId_(caseInfo) {
+  function userKeyFromLineId_(lineId) {
+    const lid = String(lineId || '').trim().toLowerCase();
+    if (!lid) return '';
+    if (/^staff\d{2}$/.test(lid)) return lid;
+    return lid.slice(0, 6);
+  }
   const rawId =
     typeof extractDriveIdMaybe_ === 'function'
       ? extractDriveIdMaybe_(caseInfo.folderId || '')
@@ -1016,7 +1022,8 @@ function s2010_resolveExistingCaseFolderId_(caseInfo) {
       ? normalizeCaseIdString_
       : function (v) { return String(v || '').trim(); };
     const cid = normCase(caseId);
-    if (lid && cid) caseKey = lid.slice(0, 6).toLowerCase() + '-' + cid;
+    const userKey = userKeyFromLineId_(lid);
+    if (userKey && cid) caseKey = userKey + '-' + cid;
   }
 
   if (caseKey) {

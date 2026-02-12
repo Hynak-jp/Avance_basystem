@@ -27,7 +27,10 @@ if (typeof getSecret_ !== 'function') {
 // フォールバック: userKey 推定（lineId 先頭6小文字）
 if (typeof drive_userKeyFromLineId_ !== 'function') {
   var drive_userKeyFromLineId_ = function (lineId) {
-    return String(lineId || '').slice(0, 6).toLowerCase();
+    var lid = String(lineId || '').trim();
+    if (!lid) return '';
+    if (/^staff\d{2}$/i.test(lid)) return lid.toLowerCase();
+    return lid.slice(0, 6).toLowerCase();
   };
 }
 
@@ -1206,7 +1209,7 @@ function doPost(e) {
     };
 
     const userKey = String(
-      (body || {}).userKey ?? (qs || {}).userKey ?? lineId.slice(0, 6).toLowerCase()
+      (body || {}).userKey ?? (qs || {}).userKey ?? drive_userKeyFromLineId_(lineId)
     ).trim();
     const displayName = String((body || {}).displayName ?? (qs || {}).displayName ?? '');
     const email = String((body || {}).email ?? (qs || {}).email ?? '');

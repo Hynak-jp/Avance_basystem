@@ -1041,8 +1041,14 @@ function getOrCreateSubfolder_(parent, name) {
  * @returns {string} 正常な Drive フォルダID
  */
 function ensureCaseFolderId_(caseInfo) {
+  function userKeyFromLineId_(lineId) {
+    const lid = String(lineId || '').trim().toLowerCase();
+    if (!lid) return '';
+    if (/^staff\d{2}$/.test(lid)) return lid;
+    return lid.slice(0, 6);
+  }
   function isValidCaseKey_(s) {
-    return /^[a-z0-9]{2,6}-\d{4}$/.test(String(s || ''));
+    return /^(?:[a-z0-9]{2,6}|staff\d{2})-\d{4}$/.test(String(s || ''));
   }
   // 1) 既存 folderId を URL→ID 抽出して試す
   const norm = extractDriveIdMaybe_(caseInfo.folderId || '');
@@ -1054,11 +1060,7 @@ function ensureCaseFolderId_(caseInfo) {
         const currentScore = scoreCaseFolder_(f);
         const nameGuess =
           caseInfo.caseKey ||
-          String(caseInfo.lineId || '')
-            .slice(0, 6)
-            .toLowerCase() +
-            '-' +
-            normalizeCaseIdString_(caseInfo.caseId || '');
+          userKeyFromLineId_(caseInfo.lineId || '') + '-' + normalizeCaseIdString_(caseInfo.caseId || '');
         const better = findBestCaseFolderUnderRoot_(nameGuess, f.getId());
         if (better && better.id !== f.getId() && better.score > currentScore.score) {
           updateCasesRow_(caseInfo.caseId, { folder_id: better.id, case_key: nameGuess });
@@ -1085,14 +1087,14 @@ function ensureCaseFolderId_(caseInfo) {
     // cases に caseKey 列が無い場合は lineId+caseId から推定（userKey = lineId 先頭6文字）
     const lid = String(caseInfo.lineId || '').trim();
     const cid = normalizeCaseIdString_(caseInfo.caseId || '');
-    const userKey = lid ? lid.slice(0, 6).toLowerCase() : '';
+    const userKey = userKeyFromLineId_(lid);
     if (userKey && cid) name = userKey + '-' + cid;
   }
   // 妥当な case_key 以外は拒否して再生成
   if (!isValidCaseKey_(name)) {
     const lid = String(caseInfo.lineId || '').trim();
     const cid = normalizeCaseIdString_(caseInfo.caseId || '');
-    const uk = lid ? lid.slice(0, 6).toLowerCase() : '';
+    const uk = userKeyFromLineId_(lid);
     if (uk && cid) name = uk + '-' + cid;
   }
   if (!isValidCaseKey_(name)) {

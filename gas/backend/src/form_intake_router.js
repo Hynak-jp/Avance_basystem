@@ -1176,7 +1176,10 @@ function formIntake_normalizeCaseId_(value) {
 }
 
 function formIntake_normalizeUserKey_(value) {
-  const raw = String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const rawBase = String(value || '').trim().toLowerCase();
+  if (!rawBase) return '';
+  if (/^staff\d{2}$/.test(rawBase)) return rawBase;
+  const raw = rawBase.replace(/[^a-z0-9]/g, '');
   if (!raw) return '';
   if (raw.length >= 6) return raw.slice(0, 6);
   return (raw + 'xxxxxx').slice(0, 6);
@@ -1645,11 +1648,11 @@ function run_ProcessInbox_AllForms(opts) {
           resolvedCaseKey = `${fallbackInfo.userKey}-${caseId}`;
         }
 
-        // 2) 妥当性ガード（^[a-z0-9]{2,6}-\d{4}$ 以外は再生成）
-        function isValidCaseKey_(s) { return /^[a-z0-9]{2,6}-\d{4}$/.test(String(s||'')); }
+        // 2) 妥当性ガード（通常キーは2-6桁、staffキーは staffNN を許容）
+        function isValidCaseKey_(s) { return /^(?:[a-z0-9]{2,6}|staff\d{2})-\d{4}$/.test(String(s||'')); }
         let finalCaseKey = resolvedCaseKey;
         if (!isValidCaseKey_(finalCaseKey)) {
-          const ukFix = (caseInfo.userKey || prepared.userKey || fallbackInfo.userKey || '').toString().slice(0,6).toLowerCase();
+          const ukFix = formIntake_normalizeUserKey_(caseInfo.userKey || prepared.userKey || fallbackInfo.userKey || '');
           const cidFix = (typeof normCaseId_ === 'function') ? normCaseId_(caseId) : String(caseId||'').replace(/\D/g,'').padStart(4,'0');
           if (ukFix && cidFix) finalCaseKey = `${ukFix}-${cidFix}`;
         }
