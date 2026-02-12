@@ -259,7 +259,9 @@ export default function FormCard({
       )}
       {isS2002Form && (
         <div className="mt-3">
-          {draftStatus === 'READY' && draftViewUrl ? (
+          {caseGuardActive || draftMessage === 'case_not_ready' ? (
+            <div className="text-sm text-gray-600">受付完了後にドラフトを生成します</div>
+          ) : draftStatus === 'READY' && draftViewUrl ? (
             <Link
               href={draftViewUrl}
               prefetch={false}
