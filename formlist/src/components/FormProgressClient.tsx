@@ -34,6 +34,14 @@ type DraftStatusResponse = {
   message?: string;
 };
 
+const normalizeKey = (f: { formKey?: string; storeKey?: string; formId: string }) =>
+  String(f.formKey || f.storeKey || f.formId || '')
+    .trim()
+    .toLowerCase();
+
+const isS2002 = (f: { formKey?: string; storeKey?: string; formId: string }) =>
+  normalizeKey(f) === 's2002_userform';
+
 export default function FormProgressClient({ lineId, displayName, caseId, forms }: Props) {
   const store = makeProgressStore(lineId)();
   const { formsMap } = useCaseFormsStatus(caseId ?? undefined, lineId);
@@ -106,7 +114,7 @@ export default function FormProgressClient({ lineId, displayName, caseId, forms 
     let timer: ReturnType<typeof setTimeout> | null = null;
     let tries = 0;
     const maxPolls = 4;
-    const hasS2002 = forms.some((f) => String(f.formKey || '').toLowerCase() === 's2002_userform');
+    const hasS2002 = forms.some((f) => isS2002(f));
     if (!hasS2002 || !caseId) {
       setDraftState({ status: 'GENERATING', message: !caseId ? 'case_not_ready' : undefined });
       return () => {};
@@ -118,6 +126,11 @@ export default function FormProgressClient({ lineId, displayName, caseId, forms 
         const res = await fetch(`/api/draft/status?${params.toString()}`, { cache: 'no-store' });
         const json = (await res.json()) as DraftStatusResponse;
         if (cancelled) return;
+        if (!res.ok) {
+          const message = json.message || `http_${res.status}`;
+          setDraftState({ status: 'GENERATING', message });
+          return;
+        }
         const status = json.status || 'GENERATING';
         setDraftState({ status, viewUrl: json.viewUrl, message: json.message });
         if (status === 'GENERATING' && tries < maxPolls) {
@@ -142,27 +155,30 @@ export default function FormProgressClient({ lineId, displayName, caseId, forms 
     <>
       <ProgressBar total={forms.length} done={doneCount} />
       <div className="grid gap-6 md:grid-cols-2">
-        {forms.map((form) => (
-          <FormCard
-            key={form.storeKey || form.formId}
-            formId={form.formId}
-            title={form.title}
-          description={form.description}
-          baseUrl={form.baseUrl}
-          signedHref={form.signedHref}
-          lineId={lineId}
-          caseId={caseId}
-          disabled={form.disabled}
-          disabledReason={form.disabledReason}
-          completed={form.completed}
-          formKey={form.formKey}
-          storeKey={form.storeKey || form.formKey || form.formId}
-            serverStatus={form.formKey ? formsMap.get(form.formKey) : undefined}
-            draftStatus={form.formKey === 's2002_userform' ? draftState.status ?? null : null}
-            draftViewUrl={form.formKey === 's2002_userform' ? draftState.viewUrl : undefined}
-            draftMessage={form.formKey === 's2002_userform' ? draftState.message : undefined}
-          />
-        ))}
+        {forms.map((form) => {
+          const s2002 = isS2002(form);
+          return (
+            <FormCard
+              key={form.storeKey || form.formId}
+              formId={form.formId}
+              title={form.title}
+              description={form.description}
+              baseUrl={form.baseUrl}
+              signedHref={form.signedHref}
+              lineId={lineId}
+              caseId={caseId}
+              disabled={form.disabled}
+              disabledReason={form.disabledReason}
+              completed={form.completed}
+              formKey={form.formKey}
+              storeKey={form.storeKey || form.formKey || form.formId}
+              serverStatus={form.formKey ? formsMap.get(form.formKey) : undefined}
+              draftStatus={s2002 ? draftState.status ?? null : null}
+              draftViewUrl={s2002 ? draftState.viewUrl : undefined}
+              draftMessage={s2002 ? draftState.message : undefined}
+            />
+          );
+        })}
       </div>
 
       <ResetProgressButton onReset={store.resetAll} />
