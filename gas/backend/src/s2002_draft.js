@@ -1156,6 +1156,55 @@ function findBestCaseFolderUnderRoot_(name, preferId) {
   return candidates[0];
 }
 
+// GDocドラフトをPDFとして保存し、失敗時はエラーマーカーを残す。
+function s2002_exportDraftPdf_(draftsPdfFolder, gdocId, draftName) {
+  const pdfName = String(draftName || 'S2002_draft') + '.pdf';
+  const errName = String(draftName || 'S2002_draft') + '.error.json';
+  try {
+    const oldErr = draftsPdfFolder.getFilesByName(errName);
+    while (oldErr.hasNext()) {
+      try { oldErr.next().setTrashed(true); } catch (_) {}
+    }
+  } catch (_) {}
+  try {
+    // 同名PDFは置き換える（最新のみ残す）
+    const oldPdf = draftsPdfFolder.getFilesByName(pdfName);
+    while (oldPdf.hasNext()) {
+      try { oldPdf.next().setTrashed(true); } catch (_) {}
+    }
+  } catch (_) {}
+  try {
+    const exportUrl = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(String(gdocId)) + '/export?mimeType=application/pdf';
+    const res = UrlFetchApp.fetch(exportUrl, {
+      method: 'get',
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true,
+    });
+    const code = Number(res.getResponseCode() || 0);
+    if (code < 200 || code >= 300) {
+      throw new Error('pdf_export_http_' + code);
+    }
+    const blob = res.getBlob().setName(pdfName);
+    const pdfFile = draftsPdfFolder.createFile(blob);
+    return { status: 'READY', pdfFileId: pdfFile.getId(), pdfName: pdfName, errorName: errName };
+  } catch (err) {
+    const payload = {
+      status: 'ERROR',
+      message: String((err && err.message) || err || 'pdf_export_failed'),
+      updatedAt: new Date().toISOString(),
+      gdocId: String(gdocId || ''),
+      draftName: String(draftName || ''),
+    };
+    try {
+      draftsPdfFolder.createFile(
+        Utilities.newBlob(JSON.stringify(payload, null, 2), 'application/json', errName)
+      );
+    } catch (_) {}
+    try { Logger.log('[S2002][PDF] export failed draftName=%s err=%s', draftName, payload.message); } catch (_) {}
+    return { status: 'ERROR', pdfFileId: '', pdfName: pdfName, errorName: errName, message: payload.message };
+  }
+}
+
 /** ====== S2002 ドラフト生成（gdoc） ====== **/
 
 function generateS2002Draft_(caseInfo, parsed) {
@@ -1163,6 +1212,7 @@ function generateS2002Draft_(caseInfo, parsed) {
   // generateS2002Draft_ 内
   const caseFolder = DriveApp.getFolderById(caseInfo.folderId);
   const drafts = getOrCreateSubfolder_(caseFolder, 'drafts');
+  const draftsPdf = getOrCreateSubfolder_(caseFolder, 'drafts_pdf');
   try {
     Logger.log('[S2002] draftsFolderId=%s caseFolderId=%s', drafts.getId(), caseInfo.folderId);
   } catch (_) {}
@@ -1383,7 +1433,17 @@ function generateS2002Draft_(caseInfo, parsed) {
 
   // 文末
   doc.saveAndClose();
-  return { gdocId, draftUrl: doc.getUrl() };
+  const pdfResult = s2002_exportDraftPdf_(draftsPdf, gdocId, draftName);
+  return {
+    gdocId: gdocId,
+    draftUrl: doc.getUrl(),
+    submissionId: String(subId || ''),
+    pdfStatus: String((pdfResult && pdfResult.status) || 'GENERATING'),
+    pdfFileId: String((pdfResult && pdfResult.pdfFileId) || ''),
+    pdfName: String((pdfResult && pdfResult.pdfName) || ''),
+    pdfErrorName: String((pdfResult && pdfResult.errorName) || ''),
+    pdfMessage: String((pdfResult && pdfResult.message) || ''),
+  };
 }
 
 /** ====== 置換ユーティリティ ====== **/

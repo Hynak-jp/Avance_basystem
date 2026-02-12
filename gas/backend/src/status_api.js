@@ -627,6 +627,134 @@ function statusApi_verifyV2_(params) {
   }
 }
 
+function statusApi_toIso_(value) {
+  try {
+    if (!value) return '';
+    var d = value instanceof Date ? value : new Date(value);
+    if (!d || !Number.isFinite(d.getTime())) return '';
+    return d.toISOString();
+  } catch (_) {
+    return '';
+  }
+}
+
+function statusApi_resolveCaseFolderId_(lineId, caseId) {
+  var lid = String(lineId || '').trim();
+  var cid = statusApi_normCaseId_(caseId);
+  if (!lid || !cid) return '';
+  var userKey = '';
+  try {
+    var row = typeof drive_lookupCaseRow_ === 'function' ? drive_lookupCaseRow_({ caseId: cid, lineId: lid }) : null;
+    if (row && row.userKey) userKey = String(row.userKey || '').trim();
+  } catch (_) {}
+  try {
+    if (!userKey && typeof drive_userKeyFromLineId_ === 'function') {
+      userKey = String(drive_userKeyFromLineId_(lid) || '').trim();
+    }
+  } catch (_) {}
+  try {
+    if (typeof bs_resolveCaseFolderId_ === 'function') {
+      return String(bs_resolveCaseFolderId_(userKey, cid, lid) || '').trim();
+    }
+    if (typeof resolveCaseFolderId_ === 'function') {
+      return String(resolveCaseFolderId_(lid, cid, /*createIfMissing=*/false) || '').trim();
+    }
+  } catch (_) {}
+  return '';
+}
+
+function statusApi_latestSubmissionId_(caseId, formKey) {
+  try {
+    var sh = typeof bs_getSheet_ === 'function' ? bs_getSheet_(
+      (typeof SHEETS_REPO_SUBMISSIONS !== 'undefined' && SHEETS_REPO_SUBMISSIONS) ? SHEETS_REPO_SUBMISSIONS : 'submissions'
+    ) : null;
+    if (!sh || sh.getLastRow() < 2) return '';
+    var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(function (v) { return String(v || '').trim(); });
+    var idx = typeof bs_toIndexMap_ === 'function' ? bs_toIndexMap_(headers) : {};
+    var ci = idx['case_id'] != null ? idx['case_id'] : idx['caseId'];
+    var fi = idx['form_key'] != null ? idx['form_key'] : idx['formKey'];
+    var si = idx['submission_id'] != null ? idx['submission_id'] : idx['submissionId'];
+    var seqIdx = idx['seq'] != null ? idx['seq'] : idx['Seq'];
+    if (!(ci >= 0 && fi >= 0) || !(si >= 0 || seqIdx >= 0)) return '';
+    var wantCase = statusApi_normCaseId_(caseId);
+    var wantForm = String(formKey || '').trim().toLowerCase();
+    var rows = sh.getRange(2, 1, sh.getLastRow() - 1, headers.length).getValues();
+    var bestSid = '';
+    var bestSeq = -1;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (statusApi_normCaseId_(row[ci]) !== wantCase) continue;
+      var fk = String(row[fi] || '').trim().toLowerCase();
+      if (fk !== wantForm) continue;
+      var sid = si >= 0 ? String(row[si] || '').trim() : '';
+      var seq = seqIdx >= 0 ? Number(row[seqIdx] || 0) || 0 : 0;
+      if (seq > bestSeq && sid) {
+        bestSeq = seq;
+        bestSid = sid;
+      } else if (!bestSid && sid) {
+        bestSid = sid;
+      }
+    }
+    return String(bestSid || '').trim();
+  } catch (_) {
+    return '';
+  }
+}
+
+function statusApi_readS2002DraftStatus_(lineId, caseId, formKey) {
+  var lid = String(lineId || '').trim();
+  var cid = statusApi_normCaseId_(caseId);
+  var fk = String(formKey || '').trim().toLowerCase();
+  if (!lid || !cid) return { status: 'GENERATING', message: 'case_not_ready' };
+  if (fk && fk !== 's2002_userform') return { status: 'GENERATING', message: 'unsupported_form' };
+  var folderId = statusApi_resolveCaseFolderId_(lid, cid);
+  if (!folderId) return { status: 'GENERATING', message: 'case_folder_missing' };
+  var caseFolder = DriveApp.getFolderById(folderId);
+  var draftPdfFolders = caseFolder.getFoldersByName('drafts_pdf');
+  if (!draftPdfFolders.hasNext()) return { status: 'GENERATING', message: 'draft_pdf_pending' };
+  var draftsPdf = draftPdfFolders.next();
+  var latestSubmissionId = statusApi_latestSubmissionId_(cid, 's2002_userform');
+  var baseName = latestSubmissionId ? ('S2002_' + cid + '_draft_' + latestSubmissionId) : ('S2002_' + cid + '_draft_');
+  var wantPdfName = latestSubmissionId ? (baseName + '.pdf') : '';
+  var wantErrName = latestSubmissionId ? (baseName + '.error.json') : '';
+  var latestPdf = null;
+  var latestErr = null;
+  var it = draftsPdf.getFiles();
+  while (it.hasNext()) {
+    var f = it.next();
+    var name = String(f.getName() || '');
+    var updated = statusApi_toIso_(f.getLastUpdated());
+    if (wantPdfName && name === wantPdfName) {
+      return { status: 'READY', pdfFileId: f.getId(), updatedAt: updated };
+    }
+    if (wantErrName && name === wantErrName) {
+      latestErr = { fileId: f.getId(), updatedAt: updated };
+    }
+    if (!latestSubmissionId && /^S2002_\d{4}_draft_.*\.pdf$/i.test(name) && name.indexOf('S2002_' + cid + '_draft_') === 0) {
+      if (!latestPdf || String(updated) > String(latestPdf.updatedAt || '')) {
+        latestPdf = { fileId: f.getId(), updatedAt: updated };
+      }
+    }
+    if (!latestSubmissionId && /^S2002_\d{4}_draft_.*\.error\.json$/i.test(name) && name.indexOf('S2002_' + cid + '_draft_') === 0) {
+      if (!latestErr || String(updated) > String(latestErr.updatedAt || '')) {
+        latestErr = { fileId: f.getId(), updatedAt: updated };
+      }
+    }
+  }
+  if (latestSubmissionId && latestErr) {
+    return { status: 'ERROR', updatedAt: latestErr.updatedAt, message: 'pdf_generation_failed' };
+  }
+  if (!latestSubmissionId && latestPdf) {
+    return { status: 'READY', pdfFileId: latestPdf.fileId, updatedAt: latestPdf.updatedAt };
+  }
+  if (!latestSubmissionId && latestErr) {
+    return { status: 'ERROR', updatedAt: latestErr.updatedAt, message: 'pdf_generation_failed' };
+  }
+  return { status: 'GENERATING', message: 'pdf_not_found_yet' };
+}
+
+var STATUS_API_DRAFT_PDF_MAX_BYTES = 3 * 1024 * 1024; // 3MB safety cap (before base64)
+
 // NOTE: doGet/status 経路では絶対にフォルダ新規作成しないこと。
 //       既存フォルダが無ければ return。限定救済は“本人の intake 実在時のみ”。
 function statusApi_collectStaging_(lineId, caseId) {
@@ -1391,6 +1519,82 @@ function doGet(e) {
       }
       return statusApi_jsonOut_(resp, 200);
     }
+
+  if (action === 'draft_status') {
+    var dv2 = statusApi_verifyV2_(p);
+    if (!(dv2 && dv2.ok)) {
+      return statusApi_jsonOut_({ ok: false, error: 'unauthorized_v2_required' }, 401);
+    }
+    var draftLineId = String(dv2.lineId || '').trim();
+    var draftCaseId = statusApi_normCaseId_(String(dv2.caseId || p.caseId || p.case_id || '').trim());
+    if (!draftLineId) return statusApi_jsonOut_({ ok: false, error: 'missing_lineId' }, 400);
+    if (!draftCaseId) {
+      draftCaseId = statusApi_normCaseId_(lookupCaseIdByLineId_(draftLineId) || '');
+    }
+    if (!draftCaseId) {
+      return statusApi_jsonOut_({ ok: false, error: 'case_not_found' }, 404);
+    }
+    var draftFormKey = String(p.formKey || p.form_key || 's2002_userform').trim();
+    var draft = statusApi_readS2002DraftStatus_(draftLineId, draftCaseId, draftFormKey);
+    return statusApi_jsonOut_(Object.assign({ ok: true, caseId: draftCaseId, formKey: draftFormKey }, draft), 200);
+  }
+
+  if (action === 'draft_pdf') {
+    var pv2 = statusApi_verifyV2_(p);
+    if (!(pv2 && pv2.ok)) {
+      return statusApi_jsonOut_({ ok: false, error: 'unauthorized_v2_required' }, 401);
+    }
+    var lineIdPdf = String(pv2.lineId || '').trim();
+    var caseIdPdf = statusApi_normCaseId_(String(pv2.caseId || p.caseId || p.case_id || '').trim());
+    if (!lineIdPdf) return statusApi_jsonOut_({ ok: false, error: 'missing_lineId' }, 400);
+    if (!caseIdPdf) caseIdPdf = statusApi_normCaseId_(lookupCaseIdByLineId_(lineIdPdf) || '');
+    if (!caseIdPdf) return statusApi_jsonOut_({ ok: false, error: 'case_not_found' }, 404);
+    var formKeyPdf = String(p.formKey || p.form_key || 's2002_userform').trim();
+    var draftStatus = statusApi_readS2002DraftStatus_(lineIdPdf, caseIdPdf, formKeyPdf);
+    if (String(draftStatus.status || '') !== 'READY' || !draftStatus.pdfFileId) {
+      return statusApi_jsonOut_(
+        {
+          ok: false,
+          error: String(draftStatus.status || '') === 'ERROR' ? 'draft_error' : 'draft_not_ready',
+          status: draftStatus.status || 'GENERATING',
+          message: draftStatus.message || '',
+        },
+        String(draftStatus.status || '') === 'ERROR' ? 409 : 404
+      );
+    }
+    try {
+      // Next API からのストリーミング用に base64 で返却する
+      var pdfFile = DriveApp.getFileById(String(draftStatus.pdfFileId));
+      var blob = pdfFile.getBlob();
+      var bytes = blob.getBytes();
+      if (bytes && bytes.length > STATUS_API_DRAFT_PDF_MAX_BYTES) {
+        return statusApi_jsonOut_(
+          {
+            ok: false,
+            error: 'too_large',
+            message: 'pdf_too_large_for_base64_transport',
+            sizeBytes: Number(bytes.length || 0),
+            limitBytes: STATUS_API_DRAFT_PDF_MAX_BYTES,
+          },
+          413
+        );
+      }
+      return statusApi_jsonOut_(
+        {
+          ok: true,
+          status: 'READY',
+          pdfFileId: String(draftStatus.pdfFileId),
+          fileName: String(pdfFile.getName() || 'draft.pdf'),
+          contentType: 'application/pdf',
+          data: Utilities.base64Encode(bytes),
+          updatedAt: draftStatus.updatedAt || '',
+        },
+        200
+      );
+    } catch (errPdf) {
+      return statusApi_jsonOut_({ ok: false, error: 'pdf_read_failed', message: String(errPdf) }, 500);
+    }
+  }
 
   if (action === 'intake_ack') {
     return statusApi_handleIntakeAck_(p);

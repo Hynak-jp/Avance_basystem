@@ -20,6 +20,9 @@ type Props = {
   formKey?: string;
   storeKey?: string;
   serverStatus?: CaseFormStatus;
+  draftStatus?: 'READY' | 'GENERATING' | 'ERROR' | null;
+  draftViewUrl?: string;
+  draftMessage?: string;
 };
 
 export default function FormCard({
@@ -36,6 +39,9 @@ export default function FormCard({
   formKey,
   storeKey,
   serverStatus,
+  draftStatus,
+  draftViewUrl,
+  draftMessage,
 }: Props) {
   const progressKey = storeKey || formKey || formId;
   const isRepeatableDoc = String(progressKey).toLowerCase() === 'doc_payslip';
@@ -62,6 +68,7 @@ export default function FormCard({
       .map((v) => v.toLowerCase())
       .some((v) => v.includes('intake')) ||
     title.includes('初回受付');
+  const isS2002Form = String(formKey || progressKey).toLowerCase() === 's2002_userform';
   // intake は常に有効扱いにするため、外部からの disabled を無視して判定する
   const internalDisabled = isIntakeForm ? false : !!disabled;
   const fallback = internalDisabled
@@ -249,6 +256,25 @@ export default function FormCard({
       )}
       {reopenedHint && isClickable && (
         <div className="mt-2 text-xs text-gray-600">{reopenedHint}</div>
+      )}
+      {isS2002Form && (
+        <div className="mt-3">
+          {draftStatus === 'READY' && draftViewUrl ? (
+            <Link
+              href={draftViewUrl}
+              prefetch={false}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-block px-3 py-2 rounded bg-blue-700 text-white"
+            >
+              ドラフト閲覧（PDF）
+            </Link>
+          ) : draftStatus === 'ERROR' ? (
+            <div className="text-sm text-red-700">生成失敗{draftMessage ? `: ${draftMessage}` : ''}</div>
+          ) : (
+            <div className="text-sm text-gray-600">生成中...</div>
+          )}
+        </div>
       )}
     </div>
   );
