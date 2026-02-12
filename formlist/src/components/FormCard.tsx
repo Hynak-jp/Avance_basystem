@@ -205,6 +205,7 @@ export default function FormCard({
     if (msg === 'draft_source_missing') return 'ドラフト元データを準備中です。';
     if (msg === 'pdf_generation_failed') return 'PDF生成に失敗しました。時間をおいて再度ご確認ください。';
     if (msg === 'status_fetch_failed') return 'ドラフト状態の取得に失敗しました。再読み込みしてください。';
+    if (msg === 'gas_endpoint_outdated') return 'システム接続先が古いためドラフト判定ができません。運用環境設定を更新してください。';
     if (msg.startsWith('http_')) return 'ドラフト状態の取得中です。';
     return msg;
   })();

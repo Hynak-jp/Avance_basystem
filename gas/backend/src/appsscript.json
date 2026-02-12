@@ -4,8 +4,16 @@
   "exceptionLogging": "STACKDRIVER",
   "dependencies": {
     "enabledAdvancedServices": [
-      { "userSymbol": "Vision", "serviceId": "vision", "version": "v1" },
-      { "userSymbol": "Drive",  "serviceId": "drive",  "version": "v3" }
+      {
+        "userSymbol": "Vision",
+        "serviceId": "vision",
+        "version": "v1"
+      },
+      {
+        "userSymbol": "Drive",
+        "serviceId": "drive",
+        "version": "v3"
+      }
     ]
   },
   "oauthScopes": [
@@ -19,6 +27,9 @@
     "https://www.googleapis.com/auth/script.scriptapp",
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/spreadsheets"
-  ]
-
+  ],
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "ANYONE_ANONYMOUS"
+  }
 }

@@ -83,10 +83,14 @@ export async function GET(req: NextRequest) {
         : String((draft.error as string) || '').trim() === 'draft_error'
         ? 'ERROR'
         : 'GENERATING';
-    const message =
+    const rawMessage =
       String((draft.message as string) || '').trim() ||
       String((draft.error as string) || '').trim() ||
       (draftRes.status >= 400 ? `http_${draftRes.status}` : undefined);
+    const message =
+      rawMessage && rawMessage.toLowerCase() === 'unknown action'
+        ? 'gas_endpoint_outdated'
+        : rawMessage;
     const payload: Record<string, unknown> = {
       ok: true,
       formKey,
@@ -100,7 +104,12 @@ export async function GET(req: NextRequest) {
       const now = Math.floor(Date.now() / 1000);
       const exp = now + 30 * 60;
       const sig = signViewToken(lineId, caseId, formKey, exp);
-      payload.viewUrl = `/api/draft/view?formKey=${encodeURIComponent(formKey)}&caseId=${encodeURIComponent(caseId)}&exp=${exp}&sig=${encodeURIComponent(sig)}`;
+      const viewUrl = new URL('/api/draft/view', req.nextUrl.origin);
+      viewUrl.searchParams.set('formKey', formKey);
+      viewUrl.searchParams.set('caseId', caseId);
+      viewUrl.searchParams.set('exp', String(exp));
+      viewUrl.searchParams.set('sig', sig);
+      payload.viewUrl = viewUrl.toString();
     }
 
     return NextResponse.json(payload, { status: 200 });
